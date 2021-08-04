@@ -240,5 +240,19 @@ var _ = Describe("Watching", func() {
 				watch("--url", atcServer.URL()+"/teams/main/pipelines/some-pipeline/jobs/some-job/builds/3?"+webQueryParams)
 			})
 		})
+
+		Context("when passing a custom team", func() {
+			expectedResponse = atc.Build{
+				ID: 4,
+				Name: "4",
+				Status: "succeeded",
+				JobName: "some-job",
+				TeamName: "some-team",
+			}
+
+			It("watches the given team", func(){
+				watch("--job", "some-pipeline/branch:master/some-job", "--build", "3","--team", "some-team")
+			})
+		})
 	})
 })
