@@ -240,5 +240,35 @@ var _ = Describe("Watching", func() {
 				watch("--url", atcServer.URL()+"/teams/main/pipelines/some-pipeline/jobs/some-job/builds/3?"+webQueryParams)
 			})
 		})
+
+	})
+
+	Context("when watching a pipeline of non-default team", func() {
+
+		var (
+			expectedURL         string
+			expectedStatusCode  int
+		)
+
+		BeforeEach(func() {
+			expectedURL = "/api/v1/teams/other-team/pipelines/some-pipeline/jobs/some-job/builds/3"
+			//expectedURL = "/api/v1/teams/other-team"
+			expectedStatusCode = http.StatusOK
+		})
+
+		JustBeforeEach(func() {
+			atcServer.AppendHandlers(
+				ghttp.CombineHandlers(
+					ghttp.VerifyRequest("GET", expectedURL),
+					ghttp.RespondWithJSONEncoded(expectedStatusCode, atc.Team{
+						Name: "other-team",
+					}),
+				),
+			)
+		})
+
+		It("watches the given team", func(){
+			watch("--job", "some-pipeline/branch:master/some-job", "--build", "3", "--team", "other-team")
+		})
 	})
 })

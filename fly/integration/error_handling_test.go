@@ -135,6 +135,8 @@ var _ = Describe("Fly CLI", func() {
 				exec.Command(flyPath, "-t", targetName, "get-pipeline", "-p", "pipeline", "--team", nonExistentTeam)),
 			Entry("order-pipelines command returns an error",
 				exec.Command(flyPath, "-t", targetName, "order-pipelines", "-p", "pipeline", "--team", nonExistentTeam)),
+			Entry("watch command returns an error",
+				exec.Command(flyPath, "-t", targetName, "watch", "-j", "pipeline/job", "--team", nonExistentTeam)),
 		)
 
 		DescribeTable("and you are NOT authorized to view the team",
@@ -177,6 +179,8 @@ var _ = Describe("Fly CLI", func() {
 				exec.Command(flyPath, "-t", targetName, "destroy-pipeline", "-p", "pipeline", "--team", otherTeam)),
 			Entry("get-pipeline command returns an error",
 				exec.Command(flyPath, "-t", targetName, "get-pipeline", "-p", "pipeline", "--team", otherTeam)),
+			Entry("watch command returns an error",
+				exec.Command(flyPath, "-t", targetName, "watch", "-j", "pipeline/job", "--team", otherTeam)),
 		)
 	})
 })
