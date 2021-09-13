@@ -11,7 +11,7 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
-	. "github.com/onsi/gomega/types"
+	"github.com/onsi/gomega/types"
 )
 
 var _ = Describe("Worker", func() {
@@ -151,7 +151,7 @@ var _ = Describe("Worker", func() {
 	Describe("Prune", func() {
 		Context("when worker exists", func() {
 			DescribeTable("worker in state",
-				func(workerState string, errMatch GomegaMatcher) {
+				func(workerState string, errMatch types.GomegaMatcher) {
 					worker, err := workerFactory.SaveWorker(atc.Worker{
 						Name:       "worker-to-prune",
 						GardenAddr: "1.2.3.4",
@@ -238,7 +238,7 @@ var _ = Describe("Worker", func() {
 			resourceConfig, err := resourceConfigFactory.FindOrCreateResourceConfig(
 				"some-resource-type",
 				atc.Source{"some": "source"},
-				atc.VersionedResourceTypes{},
+				nil,
 			)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -387,6 +387,26 @@ var _ = Describe("Worker", func() {
 					Expect(teamID.Valid).To(BeTrue())
 				})
 			})
+		})
+	})
+
+	Describe("Find/CreateContainer, fixed handle", func() {
+		It("uses the specified handle for the container", func() {
+			owner := NewFixedHandleContainerOwner("my-handle")
+			creating, err := defaultWorker.CreateContainer(owner, ContainerMetadata{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(creating.Handle()).To(Equal("my-handle"))
+
+			foundCreating, _, err := defaultWorker.FindContainer(owner)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(foundCreating).To(Equal(creating))
+
+			created, err := creating.Created()
+			Expect(err).ToNot(HaveOccurred())
+
+			_, foundCreated, err := defaultWorker.FindContainer(owner)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(foundCreated).To(Equal(created))
 		})
 	})
 

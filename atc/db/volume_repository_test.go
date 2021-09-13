@@ -14,13 +14,26 @@ import (
 var _ = Describe("VolumeRepository", func() {
 	var (
 		team2             db.Team
-		usedResourceCache db.UsedResourceCache
+		resourceTypeCache db.ResourceCache
+		usedResourceCache db.ResourceCache
 		build             db.Build
 	)
 
 	BeforeEach(func() {
 		var err error
 		build, err = defaultTeam.CreateOneOffBuild()
+		Expect(err).ToNot(HaveOccurred())
+
+		resourceTypeCache, err = resourceCacheFactory.FindOrCreateResourceCache(
+			db.ForBuild(build.ID()),
+			"some-base-resource-type",
+			atc.Version{"some-type": "version"},
+			atc.Source{
+				"some-type": "source",
+			},
+			nil,
+			nil,
+		)
 		Expect(err).ToNot(HaveOccurred())
 
 		usedResourceCache, err = resourceCacheFactory.FindOrCreateResourceCache(
@@ -31,18 +44,7 @@ var _ = Describe("VolumeRepository", func() {
 				"some": "source",
 			},
 			atc.Params{"some": "params"},
-			atc.VersionedResourceTypes{
-				atc.VersionedResourceType{
-					ResourceType: atc.ResourceType{
-						Name: "some-type",
-						Type: "some-base-resource-type",
-						Source: atc.Source{
-							"some-type": "source",
-						},
-					},
-					Version: atc.Version{"some-type": "version"},
-				},
-			},
+			resourceTypeCache,
 		)
 		Expect(err).NotTo(HaveOccurred())
 	})
@@ -448,6 +450,14 @@ var _ = Describe("VolumeRepository", func() {
 		})
 	})
 
+	Describe("CreateVolumeWithHandle", func() {
+		It("creates a CreatingVolume with a fixed handle", func() {
+			volume, err := volumeRepository.CreateVolumeWithHandle("my-handle", defaultTeam.ID(), defaultWorker.Name(), db.VolumeTypeArtifact)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(volume.Handle()).To(Equal("my-handle"))
+		})
+	})
+
 	Describe("FindBaseResourceTypeVolume", func() {
 		var usedWorkerBaseResourceType *db.UsedWorkerBaseResourceType
 		BeforeEach(func() {
@@ -499,7 +509,7 @@ var _ = Describe("VolumeRepository", func() {
 	})
 
 	Describe("FindResourceCacheVolume", func() {
-		var usedResourceCache db.UsedResourceCache
+		var usedResourceCache db.ResourceCache
 
 		BeforeEach(func() {
 			build, err := defaultPipeline.CreateOneOffBuild()
@@ -513,18 +523,7 @@ var _ = Describe("VolumeRepository", func() {
 					"some": "source",
 				},
 				atc.Params{"some": "params"},
-				atc.VersionedResourceTypes{
-					atc.VersionedResourceType{
-						ResourceType: atc.ResourceType{
-							Name: "some-type",
-							Type: "some-base-resource-type",
-							Source: atc.Source{
-								"some-type": "source",
-							},
-						},
-						Version: atc.Version{"some-type": "version"},
-					},
-				},
+				resourceTypeCache,
 			)
 			Expect(err).ToNot(HaveOccurred())
 		})

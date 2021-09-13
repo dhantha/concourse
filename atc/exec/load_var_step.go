@@ -14,21 +14,19 @@ import (
 	"code.cloudfoundry.org/lager/lagerctx"
 	"sigs.k8s.io/yaml"
 
-	"github.com/concourse/baggageclaim"
 	"github.com/concourse/concourse/atc"
-	"github.com/concourse/concourse/atc/exec/artifact"
 	"github.com/concourse/concourse/atc/exec/build"
-	"github.com/concourse/concourse/atc/worker"
 	"github.com/concourse/concourse/tracing"
+	"github.com/concourse/concourse/worker/baggageclaim"
 )
 
 // LoadVarStep loads a value from a file and sets it as a build-local var.
 type LoadVarStep struct {
-	planID           atc.PlanID
-	plan             atc.LoadVarPlan
-	metadata         StepMetadata
-	delegateFactory  BuildStepDelegateFactory
-	artifactStreamer worker.ArtifactStreamer
+	planID          atc.PlanID
+	plan            atc.LoadVarPlan
+	metadata        StepMetadata
+	delegateFactory BuildStepDelegateFactory
+	streamer        Streamer
 }
 
 func NewLoadVarStep(
@@ -36,14 +34,14 @@ func NewLoadVarStep(
 	plan atc.LoadVarPlan,
 	metadata StepMetadata,
 	delegateFactory BuildStepDelegateFactory,
-	artifactStreamer worker.ArtifactStreamer,
+	streamer Streamer,
 ) Step {
 	return &LoadVarStep{
-		planID:           planID,
-		plan:             plan,
-		metadata:         metadata,
-		delegateFactory:  delegateFactory,
-		artifactStreamer: artifactStreamer,
+		planID:          planID,
+		plan:            plan,
+		metadata:        metadata,
+		delegateFactory: delegateFactory,
+		streamer:        streamer,
 	}
 }
 
@@ -87,12 +85,6 @@ func (step *LoadVarStep) run(ctx context.Context, state RunState, delegate Build
 
 	delegate.Initializing(logger)
 	stdout := delegate.Stdout()
-	stderr := delegate.Stderr()
-
-	fmt.Fprintln(stderr, "\x1b[1;33mWARNING: the load_var step is experimental and subject to change!\x1b[0m")
-	fmt.Fprintln(stderr, "")
-	fmt.Fprintln(stderr, "\x1b[33mfollow RFC #27 for updates: https://github.com/concourse/rfcs/pull/27\x1b[0m")
-	fmt.Fprintln(stderr, "")
 
 	delegate.Starting(logger)
 
@@ -133,16 +125,13 @@ func (step *LoadVarStep) fetchVars(
 
 	art, found := state.ArtifactRepository().ArtifactFor(build.ArtifactName(artifactName))
 	if !found {
-		return nil, artifact.UnknownArtifactSourceError{
-			Name: artifactName,
-			Path: filePath,
-		}
+		return nil, UnknownArtifactSourceError{build.ArtifactName(artifactName), filePath}
 	}
 
-	stream, err := step.artifactStreamer.StreamFileFromArtifact(lagerctx.NewContext(ctx, logger), art, filePath)
+	stream, err := step.streamer.StreamFile(lagerctx.NewContext(ctx, logger), art, filePath)
 	if err != nil {
 		if err == baggageclaim.ErrFileNotFound {
-			return nil, artifact.FileNotFoundError{
+			return nil, FileNotFoundError{
 				Name:     artifactName,
 				FilePath: filePath,
 			}
@@ -211,4 +200,16 @@ func (step *LoadVarStep) isValidFormat(format string) bool {
 		return true
 	}
 	return false
+}
+
+// FileNotFoundError is returned when the specified file path does not
+// exist within its artifact source.
+type FileNotFoundError struct {
+	Name     string
+	FilePath string
+}
+
+// Error returns a human-friendly error message.
+func (err FileNotFoundError) Error() string {
+	return fmt.Sprintf("file '%s' not found within artifact '%s'", err.FilePath, err.Name)
 }

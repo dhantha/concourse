@@ -19,17 +19,15 @@ import (
 	"github.com/concourse/concourse/atc/engine/enginefakes"
 	"github.com/concourse/concourse/atc/exec"
 	"github.com/concourse/concourse/atc/policy/policyfakes"
-	"github.com/concourse/concourse/atc/worker/workerfakes"
 	"github.com/concourse/concourse/vars"
 )
 
 var _ = Describe("CheckDelegate", func() {
 	var (
-		fakeBuild           *dbfakes.FakeBuild
-		fakeClock           *fakeclock.FakeClock
-		fakeRateLimiter     *enginefakes.FakeRateLimiter
-		fakePolicyChecker   *policyfakes.FakeChecker
-		fakeArtifactSourcer *workerfakes.FakeArtifactSourcer
+		fakeBuild         *dbfakes.FakeBuild
+		fakeClock         *fakeclock.FakeClock
+		fakeRateLimiter   *enginefakes.FakeRateLimiter
+		fakePolicyChecker *policyfakes.FakeChecker
 
 		state exec.RunState
 
@@ -46,7 +44,6 @@ var _ = Describe("CheckDelegate", func() {
 		fakeBuild = new(dbfakes.FakeBuild)
 		fakeClock = fakeclock.NewFakeClock(now)
 		fakeRateLimiter = new(enginefakes.FakeRateLimiter)
-		fakeArtifactSourcer = new(workerfakes.FakeArtifactSourcer)
 		credVars := vars.StaticVariables{
 			"source-param": "super-secret-source",
 			"git-key":      "{\n123\n456\n789\n}\n",
@@ -63,7 +60,7 @@ var _ = Describe("CheckDelegate", func() {
 		fakeBuild.NameReturns(db.CheckBuildName)
 		fakeBuild.ResourceIDReturns(88)
 
-		delegate = engine.NewCheckDelegate(fakeBuild, plan, state, fakeClock, fakeRateLimiter, fakePolicyChecker, fakeArtifactSourcer)
+		delegate = engine.NewCheckDelegate(fakeBuild, plan, state, fakeClock, fakeRateLimiter, fakePolicyChecker)
 
 		fakeResourceConfig = new(dbfakes.FakeResourceConfig)
 		fakeResourceConfigScope = new(dbfakes.FakeResourceConfigScope)
@@ -85,6 +82,9 @@ var _ = Describe("CheckDelegate", func() {
 		Context("without a resource", func() {
 			BeforeEach(func() {
 				plan.Check.Resource = ""
+
+				fakePipeline := new(dbfakes.FakePipeline)
+				fakeBuild.PipelineReturns(fakePipeline, true, nil)
 			})
 
 			It("succeeds", func() {
@@ -105,7 +105,6 @@ var _ = Describe("CheckDelegate", func() {
 		Context("with a resource", func() {
 			var (
 				fakePipeline *dbfakes.FakePipeline
-				fakeResource *dbfakes.FakeResource
 			)
 
 			BeforeEach(func() {
@@ -114,24 +113,17 @@ var _ = Describe("CheckDelegate", func() {
 				fakePipeline = new(dbfakes.FakePipeline)
 				fakeBuild.PipelineReturns(fakePipeline, true, nil)
 
-				fakeResource = new(dbfakes.FakeResource)
-				fakePipeline.ResourceReturns(fakeResource, true, nil)
+				fakePipeline.ResourceIDReturns(123, true, nil)
 			})
 
 			It("succeeds", func() {
 				Expect(saveErr).ToNot(HaveOccurred())
 			})
 
-			It("looks up the resource on the pipeline", func() {
-				Expect(fakePipeline.ResourceCallCount()).To(Equal(1))
-				resourceName := fakePipeline.ResourceArgsForCall(0)
-				Expect(resourceName).To(Equal("some-resource"))
-			})
-
 			It("finds or creates a scope for the resource", func() {
 				Expect(fakeResourceConfig.FindOrCreateScopeCallCount()).To(Equal(1))
-				resource := fakeResourceConfig.FindOrCreateScopeArgsForCall(0)
-				Expect(resource).To(Equal(fakeResource))
+				resourceID := fakeResourceConfig.FindOrCreateScopeArgsForCall(0)
+				Expect(*resourceID).To(Equal(123))
 			})
 
 			It("returns the scope", func() {
@@ -154,7 +146,7 @@ var _ = Describe("CheckDelegate", func() {
 
 			Context("when the resource is not found", func() {
 				BeforeEach(func() {
-					fakePipeline.ResourceReturns(nil, false, nil)
+					fakePipeline.ResourceIDReturns(0, false, nil)
 				})
 
 				It("returns an error", func() {
@@ -208,9 +200,9 @@ var _ = Describe("CheckDelegate", func() {
 				})
 			})
 
-			Context("when the build is manually triggered", func() {
+			Context("when the check plan is configured to skip interval", func() {
 				BeforeEach(func() {
-					fakeBuild.IsManuallyTriggeredReturns(true)
+					plan.Check.SkipInterval = true
 				})
 
 				It("does not rate limit", func() {
@@ -235,6 +227,12 @@ var _ = Describe("CheckDelegate", func() {
 
 					It("returns true", func() {
 						Expect(run).To(BeTrue())
+					})
+				})
+
+				Context("when the interval is set to never on the plan", func() {
+					It("does not exit early and attmpts to fetch the last check value", func() {
+						Expect(fakeResourceConfigScope.LastCheckCallCount()).To(Equal(1))
 					})
 				})
 
@@ -265,6 +263,20 @@ var _ = Describe("CheckDelegate", func() {
 						Expect(run).To(BeTrue())
 					})
 				})
+
+				Context("when the build fails with the create time earlier the last check start time", func() {
+					BeforeEach(func() {
+						fakeBuild.CreateTimeReturns(time.Now().Add(-5 * time.Second))
+						fakeResourceConfigScope.LastCheckReturns(db.LastCheck{
+							StartTime: time.Now(),
+							Succeeded: false,
+						}, nil)
+					})
+
+					It("returns true", func() {
+						Expect(run).To(BeTrue())
+					})
+				})
 			})
 
 			Context("when getting the last check end time errors", func() {
@@ -275,17 +287,15 @@ var _ = Describe("CheckDelegate", func() {
 				It("returns an error", func() {
 					Expect(runErr).To(HaveOccurred())
 				})
-
-				It("releases the lock", func() {
-					Expect(fakeLock.ReleaseCallCount()).To(Equal(1))
-				})
 			})
 
 			Context("with an interval configured", func() {
 				var interval time.Duration = time.Minute
 
 				BeforeEach(func() {
-					plan.Check.Interval = interval.String()
+					plan.Check.Interval = atc.CheckEvery{
+						Interval: interval,
+					}
 				})
 
 				Context("when the interval has not elapsed since the last check", func() {
@@ -301,8 +311,8 @@ var _ = Describe("CheckDelegate", func() {
 						Expect(run).To(BeFalse())
 					})
 
-					It("releases the lock", func() {
-						Expect(fakeLock.ReleaseCallCount()).To(Equal(1))
+					It("never attempts to acquire the lock", func() {
+						Expect(fakeResourceConfigScope.AcquireResourceCheckingLockCallCount()).To(Equal(0))
 					})
 				})
 
@@ -318,6 +328,51 @@ var _ = Describe("CheckDelegate", func() {
 					It("returns true", func() {
 						Expect(run).To(BeTrue())
 					})
+				})
+
+				Context("when the last check value gets updated after the first loop of attempting to acquire lock", func() {
+					BeforeEach(func() {
+						fakeResourceConfigScope.LastCheckReturnsOnCall(0, db.LastCheck{
+							StartTime: now.Add(-(interval + 10)),
+							EndTime:   now.Add(-(interval + 1)),
+							Succeeded: true,
+						}, nil)
+						fakeResourceConfigScope.LastCheckReturnsOnCall(1, db.LastCheck{
+							StartTime: now.Add(time.Second).Add(-(interval + 10)),
+							EndTime:   now.Add(time.Second).Add(-(interval - 1)),
+							Succeeded: true,
+						}, nil)
+						fakeResourceConfigScope.AcquireResourceCheckingLockReturns(nil, false, nil)
+						go fakeClock.WaitForWatcherAndIncrement(time.Second)
+					})
+
+					It("exits out of loop after last check gets updated in second loop and does not run", func() {
+						Expect(run).To(BeFalse())
+					})
+
+					It("only attempts to acquire lock in first loop", func() {
+						Expect(fakeResourceConfigScope.AcquireResourceCheckingLockCallCount()).To(Equal(1))
+					})
+
+					It("rechecks the last check value in both loops", func() {
+						Expect(fakeResourceConfigScope.LastCheckCallCount()).To(Equal(2))
+					})
+				})
+			})
+
+			Context("when the interval is never", func() {
+				BeforeEach(func() {
+					plan.Check.Interval = atc.CheckEvery{
+						Never: true,
+					}
+				})
+
+				It("returns false", func() {
+					Expect(run).To(BeFalse())
+				})
+
+				It("does not attempt to fetch the last check", func() {
+					Expect(fakeResourceConfigScope.LastCheckCallCount()).To(Equal(0))
 				})
 			})
 		})
@@ -405,7 +460,6 @@ var _ = Describe("CheckDelegate", func() {
 		Context("when checking for a resource", func() {
 			var (
 				fakePipeline *dbfakes.FakePipeline
-				fakeResource *dbfakes.FakeResource
 			)
 
 			BeforeEach(func() {
@@ -413,40 +467,22 @@ var _ = Describe("CheckDelegate", func() {
 
 				fakePipeline = new(dbfakes.FakePipeline)
 				fakeBuild.PipelineReturns(fakePipeline, true, nil)
-
-				fakeResource = new(dbfakes.FakeResource)
-				fakePipeline.ResourceReturns(fakeResource, true, nil)
 			})
 
 			It("succeeds", func() {
 				Expect(pointErr).ToNot(HaveOccurred())
 			})
 
-			It("looks up the resource on the pipeline", func() {
-				Expect(fakePipeline.ResourceCallCount()).To(Equal(1))
-				resourceName := fakePipeline.ResourceArgsForCall(0)
-				Expect(resourceName).To(Equal("some-resource"))
-			})
-
 			It("sets the resource config scope", func() {
-				Expect(fakeResource.SetResourceConfigScopeCallCount()).To(Equal(1))
-				scope := fakeResource.SetResourceConfigScopeArgsForCall(0)
+				Expect(fakePipeline.SetResourceConfigScopeForResourceCallCount()).To(Equal(1))
+				name, scope := fakePipeline.SetResourceConfigScopeForResourceArgsForCall(0)
+				Expect(name).To(Equal("some-resource"))
 				Expect(scope).To(Equal(fakeResourceConfigScope))
 			})
 
 			Context("when the pipeline is not found", func() {
 				BeforeEach(func() {
 					fakeBuild.PipelineReturns(nil, false, nil)
-				})
-
-				It("returns an error", func() {
-					Expect(pointErr).To(HaveOccurred())
-				})
-			})
-
-			Context("when the resource is not found", func() {
-				BeforeEach(func() {
-					fakePipeline.ResourceReturns(nil, false, nil)
 				})
 
 				It("returns an error", func() {
@@ -457,8 +493,7 @@ var _ = Describe("CheckDelegate", func() {
 
 		Context("when checking for a resource type", func() {
 			var (
-				fakePipeline     *dbfakes.FakePipeline
-				fakeResourceType *dbfakes.FakeResourceType
+				fakePipeline *dbfakes.FakePipeline
 			)
 
 			BeforeEach(func() {
@@ -466,41 +501,22 @@ var _ = Describe("CheckDelegate", func() {
 
 				fakePipeline = new(dbfakes.FakePipeline)
 				fakeBuild.PipelineReturns(fakePipeline, true, nil)
-
-				fakeResourceType = new(dbfakes.FakeResourceType)
-				fakePipeline.ResourceTypeReturns(fakeResourceType, true, nil)
 			})
 
 			It("succeeds", func() {
 				Expect(pointErr).ToNot(HaveOccurred())
 			})
 
-			It("looks up the resource type on the pipeline", func() {
-				Expect(fakePipeline.ResourceTypeCallCount()).To(Equal(1))
-				resourceName := fakePipeline.ResourceTypeArgsForCall(0)
-				Expect(resourceName).To(Equal("some-resource-type"))
-			})
-
 			It("assigns the scope to the resource type", func() {
-				Expect(fakeResourceType.SetResourceConfigScopeCallCount()).To(Equal(1))
-
-				scope := fakeResourceType.SetResourceConfigScopeArgsForCall(0)
+				Expect(fakePipeline.SetResourceConfigScopeForResourceTypeCallCount()).To(Equal(1))
+				name, scope := fakePipeline.SetResourceConfigScopeForResourceTypeArgsForCall(0)
+				Expect(name).To(Equal("some-resource-type"))
 				Expect(scope).To(Equal(fakeResourceConfigScope))
 			})
 
 			Context("when the pipeline is not found", func() {
 				BeforeEach(func() {
 					fakeBuild.PipelineReturns(nil, false, nil)
-				})
-
-				It("returns an error", func() {
-					Expect(pointErr).To(HaveOccurred())
-				})
-			})
-
-			Context("when the resource is not found", func() {
-				BeforeEach(func() {
-					fakePipeline.ResourceTypeReturns(nil, false, nil)
 				})
 
 				It("returns an error", func() {
@@ -511,8 +527,7 @@ var _ = Describe("CheckDelegate", func() {
 
 		Context("when checking for a prototype", func() {
 			var (
-				fakePipeline  *dbfakes.FakePipeline
-				fakePrototype *dbfakes.FakePrototype
+				fakePipeline *dbfakes.FakePipeline
 			)
 
 			BeforeEach(func() {
@@ -520,41 +535,22 @@ var _ = Describe("CheckDelegate", func() {
 
 				fakePipeline = new(dbfakes.FakePipeline)
 				fakeBuild.PipelineReturns(fakePipeline, true, nil)
-
-				fakePrototype = new(dbfakes.FakePrototype)
-				fakePipeline.PrototypeReturns(fakePrototype, true, nil)
 			})
 
 			It("succeeds", func() {
 				Expect(pointErr).ToNot(HaveOccurred())
 			})
 
-			It("looks up the resource type on the pipeline", func() {
-				Expect(fakePipeline.PrototypeCallCount()).To(Equal(1))
-				resourceName := fakePipeline.PrototypeArgsForCall(0)
-				Expect(resourceName).To(Equal("some-prototype"))
-			})
-
-			It("assigns the scope to the resource type", func() {
-				Expect(fakePrototype.SetResourceConfigScopeCallCount()).To(Equal(1))
-
-				scope := fakePrototype.SetResourceConfigScopeArgsForCall(0)
+			It("assigns the scope to the prototype", func() {
+				Expect(fakePipeline.SetResourceConfigScopeForPrototypeCallCount()).To(Equal(1))
+				name, scope := fakePipeline.SetResourceConfigScopeForPrototypeArgsForCall(0)
+				Expect(name).To(Equal("some-prototype"))
 				Expect(scope).To(Equal(fakeResourceConfigScope))
 			})
 
 			Context("when the pipeline is not found", func() {
 				BeforeEach(func() {
 					fakeBuild.PipelineReturns(nil, false, nil)
-				})
-
-				It("returns an error", func() {
-					Expect(pointErr).To(HaveOccurred())
-				})
-			})
-
-			Context("when the prototype is not found", func() {
-				BeforeEach(func() {
-					fakePipeline.PrototypeReturns(nil, false, nil)
 				})
 
 				It("returns an error", func() {

@@ -15,25 +15,23 @@ import (
 	"github.com/concourse/concourse/atc/event"
 	"github.com/concourse/concourse/atc/exec"
 	"github.com/concourse/concourse/atc/policy/policyfakes"
-	"github.com/concourse/concourse/atc/runtime"
-	"github.com/concourse/concourse/atc/worker/workerfakes"
+	"github.com/concourse/concourse/atc/resource"
 	"github.com/concourse/concourse/vars"
 )
 
 var _ = Describe("PutDelegate", func() {
 	var (
-		logger              *lagertest.TestLogger
-		fakeBuild           *dbfakes.FakeBuild
-		fakeClock           *fakeclock.FakeClock
-		fakePolicyChecker   *policyfakes.FakeChecker
-		fakeArtifactSourcer *workerfakes.FakeArtifactSourcer
+		logger            *lagertest.TestLogger
+		fakeBuild         *dbfakes.FakeBuild
+		fakeClock         *fakeclock.FakeClock
+		fakePolicyChecker *policyfakes.FakeChecker
 
 		state exec.RunState
 
 		now = time.Date(1991, 6, 3, 5, 30, 0, 0, time.UTC)
 
 		delegate   exec.PutDelegate
-		info       runtime.VersionResult
+		info       resource.VersionResult
 		exitStatus exec.ExitStatus
 	)
 
@@ -48,15 +46,14 @@ var _ = Describe("PutDelegate", func() {
 		}
 		state = exec.NewRunState(noopStepper, credVars, true)
 
-		info = runtime.VersionResult{
+		info = resource.VersionResult{
 			Version:  atc.Version{"foo": "bar"},
 			Metadata: []atc.MetadataField{{Name: "baz", Value: "shmaz"}},
 		}
 
 		fakePolicyChecker = new(policyfakes.FakeChecker)
-		fakeArtifactSourcer = new(workerfakes.FakeArtifactSourcer)
 
-		delegate = engine.NewPutDelegate(fakeBuild, "some-plan-id", state, fakeClock, fakePolicyChecker, fakeArtifactSourcer)
+		delegate = engine.NewPutDelegate(fakeBuild, "some-plan-id", state, fakeClock, fakePolicyChecker)
 	})
 
 	Describe("Finished", func() {
@@ -79,7 +76,7 @@ var _ = Describe("PutDelegate", func() {
 	Describe("SaveOutput", func() {
 		var plan atc.PutPlan
 		var source atc.Source
-		var resourceTypes atc.VersionedResourceTypes
+		var resourceCache *dbfakes.FakeResourceCache
 
 		JustBeforeEach(func() {
 			plan = atc.PutPlan{
@@ -88,17 +85,18 @@ var _ = Describe("PutDelegate", func() {
 				Resource: "some-resource",
 			}
 			source = atc.Source{"some": "source"}
-			resourceTypes = atc.VersionedResourceTypes{}
+			resourceCache = new(dbfakes.FakeResourceCache)
+			resourceCache.IDReturns(123)
 
-			delegate.SaveOutput(logger, plan, source, resourceTypes, info)
+			delegate.SaveOutput(logger, plan, source, resourceCache, info)
 		})
 
 		It("saves the build output", func() {
 			Expect(fakeBuild.SaveOutputCallCount()).To(Equal(1))
-			resourceType, sourceArg, resourceTypesArg, version, metadata, name, resource := fakeBuild.SaveOutputArgsForCall(0)
+			resourceType, rc, sourceArg, version, metadata, name, resource := fakeBuild.SaveOutputArgsForCall(0)
 			Expect(resourceType).To(Equal(plan.Type))
 			Expect(sourceArg).To(Equal(source))
-			Expect(resourceTypesArg).To(Equal(resourceTypes))
+			Expect(rc.ID()).To(Equal(resourceCache.ID()))
 			Expect(version).To(Equal(info.Version))
 			Expect(metadata).To(Equal(db.NewResourceConfigMetadataFields(info.Metadata)))
 			Expect(name).To(Equal(plan.Name))

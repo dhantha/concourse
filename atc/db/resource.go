@@ -109,7 +109,7 @@ type Resource interface {
 
 	SetResourceConfigScope(ResourceConfigScope) error
 
-	CheckPlan(atc.Version, time.Duration, ResourceTypes, atc.Source) atc.CheckPlan
+	CheckPlan(planFactory atc.PlanFactory, imagePlanner atc.ImagePlanner, from atc.Version, interval atc.CheckEvery, sourceDefaults atc.Source, skipInterval bool, skipIntervalRecursively bool) atc.Plan
 	CreateBuild(context.Context, bool, atc.Plan) (Build, bool, error)
 
 	NotifyScan() error
@@ -251,7 +251,7 @@ func (r *resource) SetResourceConfigScope(scope ResourceConfigScope) error {
 
 	defer Rollback(tx)
 
-	err = r.setResourceConfigScopeInTransaction(tx, scope)
+	err = setResourceConfigScopeForResource(tx, scope, sq.Eq{"id": r.id})
 	if err != nil {
 		return err
 	}
@@ -264,54 +264,61 @@ func (r *resource) SetResourceConfigScope(scope ResourceConfigScope) error {
 	return nil
 }
 
-func (r *resource) setResourceConfigScopeInTransaction(tx Tx, scope ResourceConfigScope) error {
-	results, err := psql.Update("resources").
+func setResourceConfigScopeForResource(tx Tx, scope ResourceConfigScope, pred interface{}, args ...interface{}) error {
+	var resourceID int
+	err := psql.Update("resources").
 		Set("resource_config_id", scope.ResourceConfig().ID()).
 		Set("resource_config_scope_id", scope.ID()).
-		Where(sq.Eq{"id": r.id}).
+		Where(pred, args...).
 		Where(sq.Or{
 			sq.Eq{"resource_config_id": nil},
 			sq.Eq{"resource_config_scope_id": nil},
 			sq.NotEq{"resource_config_id": scope.ResourceConfig().ID()},
 			sq.NotEq{"resource_config_scope_id": scope.ID()},
 		}).
+		Suffix("RETURNING id").
 		RunWith(tx).
-		Exec()
+		QueryRow().
+		Scan(&resourceID)
 	if err != nil {
-		return err
-	}
-
-	rowsAffected, err := results.RowsAffected()
-	if err != nil {
-		return err
-	}
-
-	if rowsAffected > 0 {
-		err = requestScheduleForJobsUsingResource(tx, r.id)
-		if err != nil {
-			return err
+		if err == sql.ErrNoRows {
+			return nil
 		}
+		return err
+	}
+
+	err = requestScheduleForJobsUsingResource(tx, resourceID)
+	if err != nil {
+		return err
 	}
 
 	return nil
 }
 
-func (r *resource) CheckPlan(from atc.Version, interval time.Duration, resourceTypes ResourceTypes, sourceDefaults atc.Source) atc.CheckPlan {
-	return atc.CheckPlan{
-		Name:    r.Name(),
-		Type:    r.Type(),
-		Source:  sourceDefaults.Merge(r.Source()),
-		Tags:    r.Tags(),
-		Timeout: r.CheckTimeout(),
+func (r *resource) CheckPlan(planFactory atc.PlanFactory, imagePlanner atc.ImagePlanner, from atc.Version, interval atc.CheckEvery, sourceDefaults atc.Source, skipInterval bool, skipIntervalRecursively bool) atc.Plan {
+	plan := planFactory.NewPlan(atc.CheckPlan{
+		Name:    r.name,
+		Type:    r.type_,
+		Source:  sourceDefaults.Merge(r.config.Source),
+		Tags:    r.config.Tags,
+		Timeout: r.config.CheckTimeout,
 
-		FromVersion:            from,
-		Interval:               interval.String(),
-		VersionedResourceTypes: resourceTypes.Deserialize(),
+		FromVersion: from,
+		Interval:    interval,
 
-		Resource: r.Name(),
-	}
+		SkipInterval: skipInterval,
+
+		Resource: r.name,
+	})
+
+	plan.Check.TypeImage = imagePlanner.ImageForType(plan.ID, r.type_, r.config.Tags, skipInterval && skipIntervalRecursively)
+	return plan
 }
 
+// CreateBuild tries to create a check build for this resource. A new build
+// will only be created if there isn't an existing running check build for this
+// resource, or if the build is manuallyTriggered (in which case a new build
+// will always be created).
 func (r *resource) CreateBuild(ctx context.Context, manuallyTriggered bool, plan atc.Plan) (Build, bool, error) {
 	tx, err := r.conn.Begin()
 	if err != nil {

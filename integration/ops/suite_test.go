@@ -2,6 +2,7 @@ package ops_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/concourse/concourse/integration/internal/flytest"
 	"github.com/stretchr/testify/require"
@@ -33,7 +34,14 @@ func verifyUpgradeDowngrade(t *testing.T, fly flytest.Cmd) {
 	})
 
 	t.Run("can still run one-off builds", func(t *testing.T) {
-		out := fly.Output(t, "execute", "-c", "tasks/hello.yml")
+		out := fly.Output(t, "execute", "-c", "../tasks/hello.yml")
 		require.Contains(t, out, "hello")
 	})
+}
+
+func waitForVolumesGC(t *testing.T, fly flytest.Cmd) {
+	require.Eventually(t, func() bool {
+		volumes := fly.Table(t, "volumes")
+		return len(volumes) == 0
+	}, 1*time.Minute, 5*time.Second)
 }

@@ -53,13 +53,7 @@ all =
                             |> Expect.equal "job - Concourse"
                 , test "gets current timezone" <|
                     \_ ->
-                        Application.init
-                            { turbulenceImgSrc = ""
-                            , notFoundImgSrc = "notfound.svg"
-                            , csrfToken = "csrf_token"
-                            , authToken = ""
-                            , pipelineRunningKeyframes = "pipeline-running"
-                            }
+                        Application.init Data.flags
                             { protocol = Url.Http
                             , host = ""
                             , port_ = Nothing
@@ -71,13 +65,7 @@ all =
                             |> Common.contains Effects.GetCurrentTimeZone
                 , test "fetches pipelines" <|
                     \_ ->
-                        Application.init
-                            { turbulenceImgSrc = ""
-                            , notFoundImgSrc = ""
-                            , csrfToken = ""
-                            , authToken = ""
-                            , pipelineRunningKeyframes = ""
-                            }
+                        Application.init Data.flags
                             { protocol = Url.Http
                             , host = ""
                             , port_ = Nothing
@@ -879,12 +867,12 @@ all =
 
 darkGreen : String
 darkGreen =
-    "#419867"
+    "#0D9448"
 
 
 brightGreen : String
 brightGreen =
-    "#11c560"
+    "#1CBD63"
 
 
 someJobInfo : Concourse.JobIdentifier
@@ -971,7 +959,7 @@ loadingIndicatorSelector =
         "container-rotate 1568ms linear infinite"
     , style "height" "14px"
     , style "width" "14px"
-    , style "margin" "7px"
+    , style "margin" "0 7px"
     ]
 
 

@@ -82,17 +82,17 @@ middleGrey =
 
 lightGrey : String
 lightGrey =
-    "#9b9b9b"
+    "#A4A4A4"
 
 
 green : String
 green =
-    "#11c560"
+    "#1CBD63"
 
 
 blue : String
 blue =
-    "#3498db"
+    "#4BAFF2"
 
 
 darkGrey : String
@@ -102,17 +102,17 @@ darkGrey =
 
 red : String
 red =
-    "#ed4b35"
+    "#DB5442"
 
 
 amber : String
 amber =
-    "#f5a623"
+    "#DE951D"
 
 
 brown : String
 brown =
-    "#8b572a"
+    "#6E4500"
 
 
 white : String
@@ -122,7 +122,7 @@ white =
 
 fadedGreen : String
 fadedGreen =
-    "#419867"
+    "#0D9448"
 
 
 orange : String
@@ -135,13 +135,7 @@ all =
     describe "Dashboard"
         [ test "requests screen size on page load" <|
             \_ ->
-                Application.init
-                    { turbulenceImgSrc = ""
-                    , notFoundImgSrc = "notfound.svg"
-                    , csrfToken = "csrf_token"
-                    , authToken = ""
-                    , pipelineRunningKeyframes = "pipeline-running"
-                    }
+                Application.init Data.flags
                     { protocol = Url.Http
                     , host = ""
                     , port_ = Nothing
@@ -153,13 +147,7 @@ all =
                     |> Common.contains Effects.GetScreenSize
         , test "requests cluster info on page load" <|
             \_ ->
-                Application.init
-                    { turbulenceImgSrc = ""
-                    , notFoundImgSrc = "notfound.svg"
-                    , csrfToken = "csrf_token"
-                    , authToken = ""
-                    , pipelineRunningKeyframes = "pipeline-running"
-                    }
+                Application.init Data.flags
                     { protocol = Url.Http
                     , host = ""
                     , port_ = Nothing
@@ -171,13 +159,7 @@ all =
                     |> Common.contains Effects.FetchClusterInfo
         , test "requests all resources on page load" <|
             \_ ->
-                Application.init
-                    { turbulenceImgSrc = ""
-                    , notFoundImgSrc = "notfound.svg"
-                    , csrfToken = "csrf_token"
-                    , authToken = ""
-                    , pipelineRunningKeyframes = ""
-                    }
+                Application.init Data.flags
                     { protocol = Url.Http
                     , host = ""
                     , port_ = Nothing
@@ -189,13 +171,7 @@ all =
                     |> Common.contains Effects.FetchAllResources
         , test "requests all jobs on page load" <|
             \_ ->
-                Application.init
-                    { turbulenceImgSrc = ""
-                    , notFoundImgSrc = "notfound.svg"
-                    , csrfToken = "csrf_token"
-                    , authToken = ""
-                    , pipelineRunningKeyframes = ""
-                    }
+                Application.init Data.flags
                     { protocol = Url.Http
                     , host = ""
                     , port_ = Nothing
@@ -207,13 +183,7 @@ all =
                     |> Common.contains Effects.FetchAllJobs
         , test "requests all pipelines on page load" <|
             \_ ->
-                Application.init
-                    { turbulenceImgSrc = ""
-                    , notFoundImgSrc = "notfound.svg"
-                    , csrfToken = "csrf_token"
-                    , authToken = ""
-                    , pipelineRunningKeyframes = ""
-                    }
+                Application.init Data.flags
                     { protocol = Url.Http
                     , host = ""
                     , port_ = Nothing
@@ -2153,7 +2123,6 @@ givenClusterInfo version clusterName =
             Ok
                 { version = version
                 , clusterName = clusterName
-                , featureFlags = Concourse.defaultFeatureFlags
                 }
         )
 

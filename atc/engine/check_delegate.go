@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"code.cloudfoundry.org/clock"
+	"code.cloudfoundry.org/lager"
 	"code.cloudfoundry.org/lager/lagerctx"
 	"github.com/concourse/concourse/atc"
 	"github.com/concourse/concourse/atc/db"
@@ -13,7 +14,6 @@ import (
 	"github.com/concourse/concourse/atc/event"
 	"github.com/concourse/concourse/atc/exec"
 	"github.com/concourse/concourse/atc/policy"
-	"github.com/concourse/concourse/atc/worker"
 )
 
 //counterfeiter:generate . RateLimiter
@@ -28,10 +28,9 @@ func NewCheckDelegate(
 	clock clock.Clock,
 	limiter RateLimiter,
 	policyChecker policy.Checker,
-	artifactSourcer worker.ArtifactSourcer,
 ) exec.CheckDelegate {
 	return &checkDelegate{
-		BuildStepDelegate: NewBuildStepDelegate(build, plan.ID, state, clock, policyChecker, artifactSourcer),
+		BuildStepDelegate: NewBuildStepDelegate(build, plan.ID, state, clock, policyChecker),
 
 		build:       build,
 		plan:        plan.Check,
@@ -50,22 +49,45 @@ type checkDelegate struct {
 	eventOrigin event.Origin
 	clock       clock.Clock
 
-	// stashed away just so we don't have to query them multiple times
-	cachedPipeline     db.Pipeline
-	cachedResource     db.Resource
-	cachedResourceType db.ResourceType
-	cachedPrototype    db.Prototype
+	// stashed away just so we don't have to query it multiple times
+	cachedPipeline db.Pipeline
 
 	limiter RateLimiter
 }
 
-func (d *checkDelegate) FindOrCreateScope(config db.ResourceConfig) (db.ResourceConfigScope, error) {
-	resource, _, err := d.resource()
+func (d *checkDelegate) Initializing(logger lager.Logger) {
+	err := d.build.SaveEvent(event.InitializeCheck{
+		Origin: d.eventOrigin,
+		Time:   time.Now().Unix(),
+		Name:   d.plan.Name,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("get resource: %w", err)
+		logger.Error("failed-to-save-initialize-check-event", err)
+		return
 	}
 
-	scope, err := config.FindOrCreateScope(resource) // ignore found, nil is ok
+	logger.Info("initializing")
+}
+
+func (d *checkDelegate) FindOrCreateScope(config db.ResourceConfig) (db.ResourceConfigScope, error) {
+	var resourceIDPtr *int
+	if d.plan.Resource != "" {
+		pipeline, err := d.pipeline()
+		if err != nil {
+			return nil, fmt.Errorf("get pipeline: %w", err)
+		}
+
+		resourceID, found, err := pipeline.ResourceID(d.plan.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("get resource: %w", err)
+		}
+		if !found {
+			return nil, fmt.Errorf("resource '%s' deleted", d.plan.Resource)
+		}
+		resourceIDPtr = &resourceID
+	}
+
+	scope, err := config.FindOrCreateScope(resourceIDPtr)
 	if err != nil {
 		return nil, fmt.Errorf("find or create scope: %w", err)
 	}
@@ -83,30 +105,50 @@ func (d *checkDelegate) FindOrCreateScope(config db.ResourceConfig) (db.Resource
 func (d *checkDelegate) WaitToRun(ctx context.Context, scope db.ResourceConfigScope) (lock.Lock, bool, error) {
 	logger := lagerctx.FromContext(ctx)
 
-	// rate limit periodic resource checks so worker load (plus load on
-	// external services) isn't too spiky. note that we don't rate limit
-	// resource type or prototype checks, because they are created every time a
-	// resource is used (rather than periodically).
-	if !d.build.IsManuallyTriggered() && d.plan.Resource != "" {
-		err := d.limiter.Wait(ctx)
-		if err != nil {
-			return nil, false, fmt.Errorf("rate limit: %w", err)
+	if !d.plan.SkipInterval {
+		if d.plan.Interval.Never == true {
+			// exit early if user specified to never run periodic checks
+			return nil, false, nil
+		} else if d.plan.Resource != "" {
+			// rate limit periodic resource checks so worker load (plus load on
+			// external services) isn't too spiky. note that we don't rate limit
+			// resource type or prototype checks, because they are created every time a
+			// resource is used (rather than periodically).
+			err := d.limiter.Wait(ctx)
+			if err != nil {
+				return nil, false, fmt.Errorf("rate limit: %w", err)
+			}
 		}
 	}
 
-	var err error
-
-	var interval time.Duration
-	if d.plan.Interval != "" {
-		interval, err = time.ParseDuration(d.plan.Interval)
-		if err != nil {
-			return nil, false, err
-		}
-	}
+	interval := d.plan.Interval.Interval
 
 	var lock lock.Lock = lock.NoopLock{}
 	if d.plan.IsPeriodic() {
 		for {
+			lastCheck, err := scope.LastCheck()
+			if err != nil {
+				return nil, false, err
+			}
+
+			if d.plan.SkipInterval { // if the check was manually triggered
+				// If the check plan does not provide a from version
+				if d.plan.FromVersion == nil {
+					// If the last check succeeded and the check was created before the last
+					// check start time, then don't run
+					// This is so that we will avoid running redundant mnaual checks
+					if lastCheck.Succeeded && d.build.CreateTime().Before(lastCheck.StartTime) {
+						return nil, false, nil
+					}
+				}
+			} else {
+				// For periodic checks, if the current time is before the end of the last
+				// check + the interval, do not run
+				if d.clock.Now().Before(lastCheck.EndTime.Add(interval)) {
+					return nil, false, nil
+				}
+			}
+
 			var acquired bool
 			lock, acquired, err = scope.AcquireResourceCheckingLock(logger)
 			if err != nil {
@@ -123,89 +165,54 @@ func (d *checkDelegate) WaitToRun(ctx context.Context, scope db.ResourceConfigSc
 			case <-d.clock.After(time.Second):
 			}
 		}
-	}
-
-	lastCheck, err := scope.LastCheck()
-	if err != nil {
-		if releaseErr := lock.Release(); releaseErr != nil {
-			logger.Error("failed-to-release-lock", releaseErr)
-		}
-		return nil, false, err
-	}
-
-	shouldRun := false
-	if !d.plan.IsPeriodic() {
-		if !lastCheck.Succeeded || lastCheck.EndTime.Before(d.build.StartTime()) {
-			shouldRun = true
-		}
-	} else if d.build.IsManuallyTriggered() {
-		// If a manually triggered check takes a from version, then it should be run.
-		if d.plan.FromVersion != nil {
-			shouldRun = true
-		} else {
-			// ignore interval for manually triggered builds.
-			// avoid running redundant checks
-			shouldRun = !lastCheck.Succeeded || d.build.CreateTime().After(lastCheck.StartTime)
-		}
 	} else {
-		shouldRun = !d.clock.Now().Before(lastCheck.EndTime.Add(interval))
-	}
-
-	// XXX(check-refactor): we could add an else{} case and potentially sleep
-	// here until runAt is reached.
-	//
-	// then the check build queueing logic is to just make sure there's a build
-	// running for every resource, without having to check if intervals have
-	// elapsed.
-	//
-	// this could be expanded upon to short-circuit the waiting with events
-	// triggered by webhooks so that webhooks are super responsive: rather than
-	// queueing a build, it would just wake up a goroutine.
-
-	if !shouldRun {
-		err := lock.Release()
+		lastCheck, err := scope.LastCheck()
 		if err != nil {
-			return nil, false, fmt.Errorf("release lock: %w", err)
+			return nil, false, err
 		}
 
-		return nil, false, nil
+		// If last check succeeded and the end of the last check is after the start
+		// of this check, then don't run
+		if lastCheck.Succeeded && lastCheck.EndTime.After(d.build.StartTime()) {
+			return nil, false, nil
+		}
 	}
 
 	return lock, true, nil
 }
 
 func (d *checkDelegate) PointToCheckedConfig(scope db.ResourceConfigScope) error {
-	resource, found, err := d.resource()
-	if err != nil {
-		return fmt.Errorf("get resource: %w", err)
-	}
+	if d.plan.Resource != "" {
+		pipeline, err := d.pipeline()
+		if err != nil {
+			return fmt.Errorf("get pipeline: %w", err)
+		}
 
-	if found {
-		err := resource.SetResourceConfigScope(scope)
+		err = pipeline.SetResourceConfigScopeForResource(d.plan.Resource, scope)
 		if err != nil {
 			return fmt.Errorf("set resource scope: %w", err)
 		}
 	}
 
-	resourceType, found, err := d.resourceType()
-	if err != nil {
-		return fmt.Errorf("get resource type: %w", err)
-	}
+	if d.plan.ResourceType != "" {
+		pipeline, err := d.pipeline()
+		if err != nil {
+			return fmt.Errorf("get pipeline: %w", err)
+		}
 
-	if found {
-		err := resourceType.SetResourceConfigScope(scope)
+		err = pipeline.SetResourceConfigScopeForResourceType(d.plan.ResourceType, scope)
 		if err != nil {
 			return fmt.Errorf("set resource type scope: %w", err)
 		}
 	}
 
-	prototype, found, err := d.prototype()
-	if err != nil {
-		return fmt.Errorf("get prototype: %w", err)
-	}
+	if d.plan.Prototype != "" {
+		pipeline, err := d.pipeline()
+		if err != nil {
+			return fmt.Errorf("get pipeline: %w", err)
+		}
 
-	if found {
-		err := prototype.SetResourceConfigScope(scope)
+		err = pipeline.SetResourceConfigScopeForPrototype(d.plan.Prototype, scope)
 		if err != nil {
 			return fmt.Errorf("set prototype scope: %w", err)
 		}
@@ -231,88 +238,4 @@ func (d *checkDelegate) pipeline() (db.Pipeline, error) {
 	d.cachedPipeline = pipeline
 
 	return d.cachedPipeline, nil
-}
-
-func (d *checkDelegate) resource() (db.Resource, bool, error) {
-	if d.plan.Resource == "" {
-		return nil, false, nil
-	}
-
-	if d.cachedResource != nil {
-		return d.cachedResource, true, nil
-	}
-
-	pipeline, err := d.pipeline()
-	if err != nil {
-		return nil, false, err
-	}
-
-	resource, found, err := pipeline.Resource(d.plan.Resource)
-	if err != nil {
-		return nil, false, fmt.Errorf("get pipeline resource: %w", err)
-	}
-
-	if !found {
-		return nil, false, fmt.Errorf("resource '%s' deleted", d.plan.Resource)
-	}
-
-	d.cachedResource = resource
-
-	return d.cachedResource, true, nil
-}
-
-func (d *checkDelegate) resourceType() (db.ResourceType, bool, error) {
-	if d.plan.ResourceType == "" {
-		return nil, false, nil
-	}
-
-	if d.cachedResourceType != nil {
-		return d.cachedResourceType, true, nil
-	}
-
-	pipeline, err := d.pipeline()
-	if err != nil {
-		return nil, false, err
-	}
-
-	resourceType, found, err := pipeline.ResourceType(d.plan.ResourceType)
-	if err != nil {
-		return nil, false, fmt.Errorf("get pipeline resource type: %w", err)
-	}
-
-	if !found {
-		return nil, false, fmt.Errorf("resource type '%s' deleted", d.plan.ResourceType)
-	}
-
-	d.cachedResourceType = resourceType
-
-	return d.cachedResourceType, true, nil
-}
-
-func (d *checkDelegate) prototype() (db.Prototype, bool, error) {
-	if d.plan.Prototype == "" {
-		return nil, false, nil
-	}
-
-	if d.cachedPrototype != nil {
-		return d.cachedPrototype, true, nil
-	}
-
-	pipeline, err := d.pipeline()
-	if err != nil {
-		return nil, false, err
-	}
-
-	prototype, found, err := pipeline.Prototype(d.plan.Prototype)
-	if err != nil {
-		return nil, false, fmt.Errorf("get pipeline prototype: %w", err)
-	}
-
-	if !found {
-		return nil, false, fmt.Errorf("prototype '%s' deleted", d.plan.Prototype)
-	}
-
-	d.cachedPrototype = prototype
-
-	return d.cachedPrototype, true, nil
 }

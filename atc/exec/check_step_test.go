@@ -3,6 +3,7 @@ package exec_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,10 +16,9 @@ import (
 	"github.com/concourse/concourse/atc/exec"
 	"github.com/concourse/concourse/atc/exec/execfakes"
 	"github.com/concourse/concourse/atc/resource"
-	"github.com/concourse/concourse/atc/resource/resourcefakes"
 	"github.com/concourse/concourse/atc/runtime"
+	"github.com/concourse/concourse/atc/runtime/runtimetest"
 	"github.com/concourse/concourse/atc/worker"
-	"github.com/concourse/concourse/atc/worker/workerfakes"
 	"github.com/concourse/concourse/tracing"
 	"github.com/concourse/concourse/vars"
 	"go.opentelemetry.io/otel/oteltest"
@@ -34,19 +34,18 @@ var _ = Describe("CheckStep", func() {
 		cancel context.CancelFunc
 
 		planID                    atc.PlanID
-		fakeRunState              *execfakes.FakeRunState
-		fakeResourceFactory       *resourcefakes.FakeResourceFactory
-		fakeResource              *resourcefakes.FakeResource
+		runState                  exec.RunState
 		fakeResourceConfigFactory *dbfakes.FakeResourceConfigFactory
 		fakeResourceConfig        *dbfakes.FakeResourceConfig
 		fakeResourceConfigScope   *dbfakes.FakeResourceConfigScope
-		fakePool                  *workerfakes.FakePool
-		fakeClient                *workerfakes.FakeClient
-		fakeStrategy              *workerfakes.FakeContainerPlacementStrategy
 		fakeDelegate              *execfakes.FakeCheckDelegate
 		fakeDelegateFactory       *execfakes.FakeCheckDelegateFactory
 		spanCtx                   context.Context
 		defaultTimeout            = time.Hour
+
+		fakePool        *execfakes.FakePool
+		chosenWorker    *runtimetest.Worker
+		chosenContainer *runtimetest.WorkerContainer
 
 		fakeStdout, fakeStderr io.Writer
 
@@ -57,6 +56,8 @@ var _ = Describe("CheckStep", func() {
 
 		stepOk  bool
 		stepErr error
+
+		expectedOwner db.ContainerOwner
 	)
 
 	BeforeEach(func() {
@@ -64,17 +65,30 @@ var _ = Describe("CheckStep", func() {
 
 		planID = "some-plan-id"
 
-		fakeRunState = new(execfakes.FakeRunState)
-		fakeResourceFactory = new(resourcefakes.FakeResourceFactory)
-		fakeResource = new(resourcefakes.FakeResource)
-		fakeStrategy = new(workerfakes.FakeContainerPlacementStrategy)
+		runState = exec.NewRunState(noopStepper, vars.StaticVariables{"source-var": "super-secret-source"}, false)
 		fakeDelegateFactory = new(execfakes.FakeCheckDelegateFactory)
 		fakeDelegate = new(execfakes.FakeCheckDelegate)
 
-		fakeClient = new(workerfakes.FakeClient)
-		fakeClient.NameReturns("some-worker")
-		fakePool = new(workerfakes.FakePool)
-		fakePool.SelectWorkerReturns(fakeClient, 0, nil)
+		stepMetadata = exec.StepMetadata{
+			TeamID:  345,
+			BuildID: 678,
+		}
+		expectedOwner = db.NewBuildStepContainerOwner(stepMetadata.BuildID, planID, stepMetadata.TeamID)
+
+		chosenWorker = runtimetest.NewWorker("worker").
+			WithContainer(
+				expectedOwner,
+				runtimetest.NewContainer().WithProcess(
+					runtime.ProcessSpec{
+						Path: "/opt/resource/check",
+					},
+					runtimetest.ProcessStub{},
+				),
+				nil,
+			)
+		chosenContainer = chosenWorker.Containers[0]
+		fakePool = new(execfakes.FakePool)
+		fakePool.FindOrSelectWorkerReturns(chosenWorker, nil)
 
 		spanCtx = context.Background()
 		fakeDelegate.StartSpanReturns(spanCtx, tracing.NoopSpan)
@@ -85,10 +99,7 @@ var _ = Describe("CheckStep", func() {
 		fakeStderr = bytes.NewBufferString("err")
 		fakeDelegate.StderrReturns(fakeStderr)
 
-		stepMetadata = exec.StepMetadata{}
 		containerMetadata = db.ContainerMetadata{}
-
-		fakeResourceFactory.NewResourceReturns(fakeResource)
 
 		fakeResourceConfigFactory = new(dbfakes.FakeResourceConfigFactory)
 		fakeResourceConfig = new(dbfakes.FakeResourceConfig)
@@ -108,38 +119,14 @@ var _ = Describe("CheckStep", func() {
 			Name:   "some-name",
 			Type:   "some-base-type",
 			Source: atc.Source{"some": "((source-var))"},
-			VersionedResourceTypes: atc.VersionedResourceTypes{
-				{
-					ResourceType: atc.ResourceType{
-						Name:   "some-custom-type",
-						Type:   "another-custom-type",
-						Source: atc.Source{"some-custom": "((source-var))"},
-						Params: atc.Params{"some-custom": "((params-var))"},
-					},
-					Version: atc.Version{"some-custom": "version"},
-				},
-				{
-					ResourceType: atc.ResourceType{
-						Name:       "another-custom-type",
-						Type:       "registry-image",
-						Source:     atc.Source{"another-custom": "((source-var))"},
-						Privileged: true,
-					},
-					Version: atc.Version{"another-custom": "version"},
-				},
+			TypeImage: atc.TypeImage{
+				BaseType: "some-base-type",
 			},
 		}
 
 		containerMetadata = db.ContainerMetadata{
 			User: "test-user",
 		}
-
-		stepMetadata = exec.StepMetadata{
-			TeamID:  345,
-			BuildID: 678,
-		}
-
-		fakeRunState.GetStub = vars.StaticVariables{"source-var": "super-secret-source"}.Get
 	})
 
 	AfterEach(func() {
@@ -151,16 +138,15 @@ var _ = Describe("CheckStep", func() {
 			planID,
 			checkPlan,
 			stepMetadata,
-			fakeResourceFactory,
 			fakeResourceConfigFactory,
 			containerMetadata,
-			fakeStrategy,
+			nil,
 			fakePool,
 			fakeDelegateFactory,
 			defaultTimeout,
 		)
 
-		stepOk, stepErr = checkStep.Run(ctx, fakeRunState)
+		stepOk, stepErr = checkStep.Run(ctx, runState)
 	})
 
 	Context("with a reasonable configuration", func() {
@@ -173,12 +159,11 @@ var _ = Describe("CheckStep", func() {
 				fakeDelegate.WaitToRunReturns(nil, false, nil)
 			})
 
-			It("does not run the check step", func() {
-				Expect(fakeClient.RunCheckStepCallCount()).To(Equal(0))
-			})
-
-			It("succeeds", func() {
+			It("doesn't run the step and succeeds", func() {
+				Expect(stepErr).ToNot(HaveOccurred())
 				Expect(stepOk).To(BeTrue())
+
+				Expect(chosenContainer.RunningProcesses()).To(BeEmpty())
 			})
 
 			Context("when there is a latest version", func() {
@@ -189,9 +174,8 @@ var _ = Describe("CheckStep", func() {
 				})
 
 				It("stores the latest version as the step result", func() {
-					Expect(fakeRunState.StoreResultCallCount()).To(Equal(1))
-					id, val := fakeRunState.StoreResultArgsForCall(0)
-					Expect(id).To(Equal(atc.PlanID("some-plan-id")))
+					var val atc.Version
+					Expect(runState.Result(planID, &val)).To(BeTrue())
 					Expect(val).To(Equal(atc.Version{"some": "latest-version"}))
 				})
 			})
@@ -202,7 +186,8 @@ var _ = Describe("CheckStep", func() {
 				})
 
 				It("does not store a version", func() {
-					Expect(fakeRunState.StoreResultCallCount()).To(Equal(0))
+					var dst interface{}
+					Expect(runState.Result(planID, &dst)).To(BeFalse())
 				})
 			})
 		})
@@ -210,9 +195,17 @@ var _ = Describe("CheckStep", func() {
 		Context("running", func() {
 			var fakeLock *lockfakes.FakeLock
 
+			var invokedResource resource.Resource
+
 			BeforeEach(func() {
 				fakeLock = new(lockfakes.FakeLock)
 				fakeDelegate.WaitToRunReturns(fakeLock, true, nil)
+
+				invokedResource = resource.Resource{}
+
+				chosenContainer.ProcessDefs[0].Stub.Do = func(_ context.Context, p *runtimetest.Process) error {
+					return json.NewDecoder(p.Stdin()).Decode(&invokedResource)
+				}
 			})
 
 			Context("when given a from version", func() {
@@ -221,9 +214,7 @@ var _ = Describe("CheckStep", func() {
 				})
 
 				It("constructs the resource with the version", func() {
-					Expect(fakeResourceFactory.NewResourceCallCount()).To(Equal(1))
-					_, _, fromVersion := fakeResourceFactory.NewResourceArgsForCall(0)
-					Expect(fromVersion).To(Equal(checkPlan.FromVersion))
+					Expect(invokedResource.Version).To(Equal(checkPlan.FromVersion))
 				})
 			})
 
@@ -246,19 +237,17 @@ var _ = Describe("CheckStep", func() {
 				})
 
 				It("finds the latest version itself - it's a strong, independent check step who dont need no plan", func() {
-					Expect(fakeResourceFactory.NewResourceCallCount()).To(Equal(1))
-					_, _, fromVersion := fakeResourceFactory.NewResourceArgsForCall(0)
-					Expect(fromVersion).To(Equal(atc.Version{"latest": "version"}))
+					Expect(invokedResource.Version).To(Equal(atc.Version{"latest": "version"}))
 				})
 			})
 
 			Describe("worker selection", func() {
 				var ctx context.Context
-				var workerSpec worker.WorkerSpec
+				var workerSpec worker.Spec
 
 				JustBeforeEach(func() {
-					Expect(fakePool.SelectWorkerCallCount()).To(Equal(1))
-					ctx, _, _, workerSpec, _, _ = fakePool.SelectWorkerArgsForCall(0)
+					Expect(fakePool.FindOrSelectWorkerCallCount()).To(Equal(1))
+					ctx, _, _, workerSpec, _, _ = fakePool.FindOrSelectWorkerArgsForCall(0)
 				})
 
 				It("doesn't enforce a timeout", func() {
@@ -289,12 +278,12 @@ var _ = Describe("CheckStep", func() {
 				It("emits a SelectedWorker event", func() {
 					Expect(fakeDelegate.SelectedWorkerCallCount()).To(Equal(1))
 					_, workerName := fakeDelegate.SelectedWorkerArgsForCall(0)
-					Expect(workerName).To(Equal("some-worker"))
+					Expect(workerName).To(Equal("worker"))
 				})
 
 				Context("when selecting a worker fails", func() {
 					BeforeEach(func() {
-						fakePool.SelectWorkerReturns(nil, 0, errors.New("nope"))
+						fakePool.FindOrSelectWorkerReturns(nil, errors.New("nope"))
 					})
 
 					It("returns an err", func() {
@@ -304,205 +293,67 @@ var _ = Describe("CheckStep", func() {
 			})
 
 			Describe("running the check step", func() {
-				var runCtx context.Context
-				var owner db.ContainerOwner
-				var containerSpec worker.ContainerSpec
-				var metadata db.ContainerMetadata
-				var processSpec runtime.ProcessSpec
-				var startEventDelegate runtime.StartingEventDelegate
-				var resource resource.Resource
-
-				JustBeforeEach(func() {
-					Expect(fakeClient.RunCheckStepCallCount()).To(Equal(1), "check step should have run")
-					runCtx, owner, containerSpec, metadata, processSpec, startEventDelegate, resource = fakeClient.RunCheckStepArgsForCall(0)
-				})
-
-				It("uses ResourceConfigCheckSessionOwner", func() {
-					expected := db.NewBuildStepContainerOwner(
-						678,
-						planID,
-						345,
+				Context("when using a custom resource type", func() {
+					var (
+						fakeImageSpec          runtime.ImageSpec
+						fakeImageResourceCache *dbfakes.FakeResourceCache
 					)
 
-					Expect(owner).To(Equal(expected))
-				})
-
-				Context("when the plan is for a resource", func() {
 					BeforeEach(func() {
-						checkPlan.Resource = "some-resource"
-					})
-
-					It("uses ResourceConfigCheckSessionOwner", func() {
-						expected := db.NewResourceConfigCheckSessionContainerOwner(
-							501,
-							502,
-							db.ContainerOwnerExpiries{Min: 5 * time.Minute, Max: 1 * time.Hour},
-						)
-
-						Expect(owner).To(Equal(expected))
-					})
-				})
-
-				Context("when the plan specifies a timeout", func() {
-					BeforeEach(func() {
-						checkPlan.Timeout = "1h"
-					})
-
-					It("enforces it on the check", func() {
-						t, ok := runCtx.Deadline()
-						Expect(ok).To(BeTrue())
-						Expect(t).To(BeTemporally("~", time.Now().Add(time.Hour), time.Minute))
-					})
-
-					Context("when running times out", func() {
-						BeforeEach(func() {
-							fakeClient.RunCheckStepReturns(
-								worker.CheckResult{},
-								fmt.Errorf("wrapped: %w", context.DeadlineExceeded),
-							)
-						})
-
-						It("fails without error", func() {
-							Expect(stepOk).To(BeFalse())
-							Expect(stepErr).To(BeNil())
-						})
-
-						It("emits an Errored event", func() {
-							Expect(fakeDelegate.ErroredCallCount()).To(Equal(1))
-							_, status := fakeDelegate.ErroredArgsForCall(0)
-							Expect(status).To(Equal(exec.TimeoutLogMessage))
-						})
-					})
-				})
-
-				It("passes the process spec", func() {
-					Expect(processSpec).To(Equal(runtime.ProcessSpec{
-						Path:         "/opt/resource/check",
-						StdoutWriter: fakeStdout,
-						StderrWriter: fakeStderr,
-					}))
-				})
-
-				It("passes the delegate as the start event delegate", func() {
-					Expect(startEventDelegate).To(Equal(fakeDelegate))
-				})
-
-				Context("uses containerspec", func() {
-					It("with certs volume mount", func() {
-						Expect(containerSpec.BindMounts).To(HaveLen(1))
-						mount := containerSpec.BindMounts[0]
-
-						_, ok := mount.(*worker.CertsVolumeMount)
-						Expect(ok).To(BeTrue())
-					})
-
-					It("uses base type for image", func() {
-						Expect(containerSpec.ImageSpec).To(Equal(worker.ImageSpec{
-							ResourceType: "some-base-type",
-						}))
-					})
-
-					It("with teamid set", func() {
-						Expect(containerSpec.TeamID).To(Equal(345))
-					})
-
-					It("with env vars", func() {
-						Expect(containerSpec.Env).To(ContainElement("BUILD_TEAM_ID=345"))
-					})
-
-					Context("when tracing is enabled", func() {
-						var buildSpan trace.Span
-
-						BeforeEach(func() {
-							tracing.ConfigureTraceProvider(oteltest.NewTracerProvider())
-
-							spanCtx, buildSpan = tracing.StartSpan(ctx, "build", nil)
-							fakeDelegate.StartSpanReturns(spanCtx, buildSpan)
-						})
-
-						AfterEach(func() {
-							tracing.Configured = false
-						})
-
-						It("propagates span context to the worker client", func() {
-							Expect(runCtx).To(Equal(rewrapLogger(spanCtx)))
-						})
-
-						It("populates the TRACEPARENT env var", func() {
-							Expect(containerSpec.Env).To(ContainElement(MatchRegexp(`TRACEPARENT=.+`)))
-						})
-					})
-				})
-
-				It("uses container metadata", func() {
-					Expect(metadata).To(Equal(containerMetadata))
-				})
-
-				It("uses the resource created", func() {
-					Expect(resource).To(Equal(fakeResource))
-				})
-
-				Context("when using a custom resource type", func() {
-					var fakeImageSpec worker.ImageSpec
-
-					BeforeEach(func() {
-						checkPlan.Type = "some-custom-type"
-
-						fakeImageSpec = worker.ImageSpec{
-							ImageArtifactSource: new(workerfakes.FakeStreamableArtifactSource),
+						checkPlan.TypeImage.GetPlan = &atc.Plan{
+							ID: "1/image-get",
+							Get: &atc.GetPlan{
+								Name:   "some-custom-type",
+								Type:   "another-custom-type",
+								Source: atc.Source{"some-custom": "((source-var))"},
+								Params: atc.Params{"some-custom": "((params-var))"},
+							},
 						}
 
-						fakeDelegate.FetchImageReturns(fakeImageSpec, nil)
+						checkPlan.TypeImage.CheckPlan = &atc.Plan{
+							ID: "1/image-check",
+							Check: &atc.CheckPlan{
+								Name:   "some-custom-type",
+								Type:   "another-custom-type",
+								Source: atc.Source{"some-custom": "((source-var))"},
+							},
+						}
+
+						checkPlan.Type = "some-custom-type"
+
+						fakeImageSpec = runtime.ImageSpec{
+							ImageArtifact: runtimetest.NewVolume("some-volume"),
+						}
+
+						fakeImageResourceCache = new(dbfakes.FakeResourceCache)
+						fakeImageResourceCache.IDReturns(123)
+
+						fakeDelegate.FetchImageReturns(fakeImageSpec, fakeImageResourceCache, nil)
 					})
 
-					It("fetches the resource type image and uses it for the container", func() {
+					It("fetches the resource type image", func() {
 						Expect(fakeDelegate.FetchImageCallCount()).To(Equal(1))
-
-						_, imageResource, types, privileged := fakeDelegate.FetchImageArgsForCall(0)
-
-						By("fetching the type image")
-						Expect(imageResource).To(Equal(atc.ImageResource{
-							Name:    "some-custom-type",
-							Type:    "another-custom-type",
-							Source:  atc.Source{"some-custom": "((source-var))"},
-							Params:  atc.Params{"some-custom": "((params-var))"},
-							Version: atc.Version{"some-custom": "version"},
-						}))
-
-						By("excluding the type from the FetchImage call")
-						Expect(types).To(Equal(atc.VersionedResourceTypes{
-							{
-								ResourceType: atc.ResourceType{
-									Name:       "another-custom-type",
-									Type:       "registry-image",
-									Source:     atc.Source{"another-custom": "((source-var))"},
-									Privileged: true,
-								},
-								Version: atc.Version{"another-custom": "version"},
-							},
-						}))
-
-						By("not being privileged")
+						_, actualGetImagePlan, actualCheckImagePlan, privileged := fakeDelegate.FetchImageArgsForCall(0)
+						Expect(actualGetImagePlan).To(Equal(*checkPlan.TypeImage.GetPlan))
+						Expect(actualCheckImagePlan).To(Equal(checkPlan.TypeImage.CheckPlan))
 						Expect(privileged).To(BeFalse())
 					})
 
-					It("sets the bottom-most type in the worker spec", func() {
-						Expect(fakePool.SelectWorkerCallCount()).To(Equal(1))
-						_, _, _, workerSpec, _, _ := fakePool.SelectWorkerArgsForCall(0)
-
-						Expect(workerSpec).To(Equal(worker.WorkerSpec{
-							TeamID:       stepMetadata.TeamID,
-							ResourceType: "registry-image",
-						}))
+					It("sets the image spec in the container spec", func() {
+						Expect(chosenContainer.Spec.ImageSpec).To(Equal(fakeImageSpec))
 					})
 
-					It("sets the image spec in the container spec", func() {
-						Expect(containerSpec.ImageSpec).To(Equal(fakeImageSpec))
+					It("creates the resource config using the image resource cache", func() {
+						Expect(fakeResourceConfigFactory.FindOrCreateResourceConfigCallCount()).To(Equal(1))
+						type_, source, irc := fakeResourceConfigFactory.FindOrCreateResourceConfigArgsForCall(0)
+						Expect(type_).To(Equal("some-custom-type"))
+						Expect(source).To(Equal(atc.Source{"some": "super-secret-source"}))
+						Expect(irc).To(Equal(fakeImageResourceCache))
 					})
 
 					Context("when the resource type is privileged", func() {
 						BeforeEach(func() {
-							checkPlan.Type = "another-custom-type"
+							checkPlan.TypeImage.Privileged = true
 						})
 
 						It("fetches the image with privileged", func() {
@@ -511,48 +362,100 @@ var _ = Describe("CheckStep", func() {
 							Expect(privileged).To(BeTrue())
 						})
 					})
+				})
 
-					Context("when the plan configures tags", func() {
-						BeforeEach(func() {
-							checkPlan.Tags = atc.Tags{"plan", "tags"}
-						})
+				Context("when the plan is for a resource", func() {
+					BeforeEach(func() {
+						checkPlan.Resource = "some-resource"
 
-						It("fetches using the tags", func() {
-							Expect(fakeDelegate.FetchImageCallCount()).To(Equal(1))
-							_, imageResource, _, _ := fakeDelegate.FetchImageArgsForCall(0)
-							Expect(imageResource.Tags).To(Equal(atc.Tags{"plan", "tags"}))
-						})
+						expectedOwner = db.NewResourceConfigCheckSessionContainerOwner(
+							501,
+							502,
+							db.ContainerOwnerExpiries{Min: 5 * time.Minute, Max: 1 * time.Hour},
+						)
+
+						chosenWorker = runtimetest.NewWorker("worker").
+							WithContainer(
+								expectedOwner,
+								runtimetest.NewContainer().WithProcess(
+									runtime.ProcessSpec{
+										Path: "/opt/resource/check",
+									},
+									runtimetest.ProcessStub{},
+								),
+								nil,
+							)
+						chosenContainer = chosenWorker.Containers[0]
+						fakePool.FindOrSelectWorkerReturns(chosenWorker, nil)
 					})
 
-					Context("when the resource type configures tags", func() {
+					It("uses ResourceConfigCheckSessionOwner", func() {
+						Expect(chosenContainer.RunningProcesses()).To(HaveLen(1))
+					})
+				})
+
+				Context("when the plan specifies a timeout", func() {
+					BeforeEach(func() {
+						checkPlan.Timeout = "1ms"
+
+						chosenContainer.ProcessDefs[0].Stub.Do = func(ctx context.Context, _ *runtimetest.Process) error {
+							select {
+							case <-ctx.Done():
+								return fmt.Errorf("wrapped: %w", ctx.Err())
+							case <-time.After(100 * time.Millisecond):
+								return nil
+							}
+						}
+					})
+
+					It("fails without error", func() {
+						Expect(stepOk).To(BeFalse())
+						Expect(stepErr).To(BeNil())
+					})
+
+					It("emits an Errored event", func() {
+						Expect(fakeDelegate.ErroredCallCount()).To(Equal(1))
+						_, status := fakeDelegate.ErroredArgsForCall(0)
+						Expect(status).To(Equal(exec.TimeoutLogMessage))
+					})
+				})
+
+				Context("uses containerspec", func() {
+					It("with certs volume mount", func() {
+						Expect(chosenContainer.Spec.CertsBindMount).To(BeTrue())
+					})
+
+					It("uses base type for image", func() {
+						Expect(chosenContainer.Spec.ImageSpec).To(Equal(runtime.ImageSpec{
+							ResourceType: "some-base-type",
+						}))
+					})
+
+					It("does not set the workdir", func() {
+						Expect(chosenContainer.Spec.Dir).To(Equal(""))
+					})
+
+					Context("when tracing is enabled", func() {
 						BeforeEach(func() {
-							taggedType, found := checkPlan.VersionedResourceTypes.Lookup("some-custom-type")
-							Expect(found).To(BeTrue())
+							tracing.ConfigureTraceProvider(oteltest.NewTracerProvider())
 
-							taggedType.Tags = atc.Tags{"type", "tags"}
+							spanCtx, buildSpan := tracing.StartSpan(ctx, "build", nil)
+							fakeDelegate.StartSpanReturns(spanCtx, buildSpan)
 
-							newTypes := checkPlan.VersionedResourceTypes.Without("some-custom-type")
-							newTypes = append(newTypes, taggedType)
-
-							checkPlan.VersionedResourceTypes = newTypes
+							chosenContainer.ProcessDefs[0].Stub.Do = func(ctx context.Context, _ *runtimetest.Process) error {
+								defer GinkgoRecover()
+								// Properly propagates span context
+								Expect(tracing.FromContext(ctx)).To(Equal(buildSpan))
+								return nil
+							}
 						})
 
-						It("fetches using the type tags", func() {
-							Expect(fakeDelegate.FetchImageCallCount()).To(Equal(1))
-							_, imageResource, _, _ := fakeDelegate.FetchImageArgsForCall(0)
-							Expect(imageResource.Tags).To(Equal(atc.Tags{"type", "tags"}))
+						AfterEach(func() {
+							tracing.Configured = false
 						})
 
-						Context("when the plan ALSO configures tags", func() {
-							BeforeEach(func() {
-								checkPlan.Tags = atc.Tags{"plan", "tags"}
-							})
-
-							It("fetches using only the type tags", func() {
-								Expect(fakeDelegate.FetchImageCallCount()).To(Equal(1))
-								_, imageResource, _, _ := fakeDelegate.FetchImageArgsForCall(0)
-								Expect(imageResource.Tags).To(Equal(atc.Tags{"type", "tags"}))
-							})
+						It("populates the TRACEPARENT env var", func() {
+							Expect(chosenContainer.Spec.Env).To(ContainElement(MatchRegexp(`TRACEPARENT=.+`)))
 						})
 					})
 				})
@@ -583,12 +486,10 @@ var _ = Describe("CheckStep", func() {
 
 			Context("having RunCheckStep succeed", func() {
 				BeforeEach(func() {
-					fakeClient.RunCheckStepReturns(worker.CheckResult{
-						Versions: []atc.Version{
-							{"version": "1"},
-							{"version": "2"},
-						},
-					}, nil)
+					chosenContainer.ProcessDefs[0].Stub.Output = []atc.Version{
+						{"version": "1"},
+						{"version": "2"},
+					}
 				})
 
 				It("succeeds", func() {
@@ -597,32 +498,10 @@ var _ = Describe("CheckStep", func() {
 
 				It("saves the versions to the config scope", func() {
 					Expect(fakeResourceConfigFactory.FindOrCreateResourceConfigCallCount()).To(Equal(1))
-					type_, source, types := fakeResourceConfigFactory.FindOrCreateResourceConfigArgsForCall(0)
+					type_, source, irc := fakeResourceConfigFactory.FindOrCreateResourceConfigArgsForCall(0)
 					Expect(type_).To(Equal("some-base-type"))
 					Expect(source).To(Equal(atc.Source{"some": "super-secret-source"}))
-					Expect(types).To(Equal(atc.VersionedResourceTypes{
-						{
-							ResourceType: atc.ResourceType{
-								Name:   "some-custom-type",
-								Type:   "another-custom-type",
-								Source: atc.Source{"some-custom": "super-secret-source"},
-
-								// params don't need to be interpolated because it's used for
-								// fetching, not constructing the resource config
-								Params: atc.Params{"some-custom": "((params-var))"},
-							},
-							Version: atc.Version{"some-custom": "version"},
-						},
-						{
-							ResourceType: atc.ResourceType{
-								Name:       "another-custom-type",
-								Type:       "registry-image",
-								Source:     atc.Source{"another-custom": "super-secret-source"},
-								Privileged: true,
-							},
-							Version: atc.Version{"another-custom": "version"},
-						},
-					}))
+					Expect(irc).To(BeNil())
 
 					Expect(fakeDelegate.FindOrCreateScopeCallCount()).To(Equal(1))
 					config := fakeDelegate.FindOrCreateScopeArgsForCall(0)
@@ -637,9 +516,8 @@ var _ = Describe("CheckStep", func() {
 				})
 
 				It("stores the latest version as the step result", func() {
-					Expect(fakeRunState.StoreResultCallCount()).To(Equal(1))
-					id, val := fakeRunState.StoreResultArgsForCall(0)
-					Expect(id).To(Equal(atc.PlanID("some-plan-id")))
+					var val atc.Version
+					Expect(runState.Result(planID, &val)).To(BeTrue())
 					Expect(val).To(Equal(atc.Version{"version": "2"}))
 				})
 
@@ -651,7 +529,7 @@ var _ = Describe("CheckStep", func() {
 
 				Context("when no versions are returned", func() {
 					BeforeEach(func() {
-						fakeClient.RunCheckStepReturns(worker.CheckResult{Versions: []atc.Version{}}, nil)
+						chosenContainer.ProcessDefs[0].Stub.Output = []atc.Version{}
 					})
 
 					It("succeeds", func() {
@@ -660,21 +538,22 @@ var _ = Describe("CheckStep", func() {
 					})
 
 					It("does not store a version", func() {
-						Expect(fakeRunState.StoreResultCallCount()).To(Equal(0))
+						var dst interface{}
+						Expect(runState.Result(planID, &dst)).To(BeFalse())
 					})
 				})
 
 				Context("before running the check", func() {
 					BeforeEach(func() {
 						fakeResourceConfigScope.UpdateLastCheckStartTimeStub = func() (bool, error) {
-							Expect(fakeClient.RunCheckStepCallCount()).To(Equal(0))
+							Expect(chosenContainer.RunningProcesses()).To(BeEmpty())
 							return true, nil
 						}
 					})
 
 					It("updates the scope's last check start time", func() {
 						Expect(fakeResourceConfigScope.UpdateLastCheckStartTimeCallCount()).To(Equal(1))
-						Expect(fakeClient.RunCheckStepCallCount()).To(Equal(1))
+						Expect(chosenContainer.RunningProcesses()).To(HaveLen(1))
 					})
 				})
 
@@ -714,17 +593,13 @@ var _ = Describe("CheckStep", func() {
 				})
 			})
 
-			Context("having RunCheckStep erroring", func() {
-				var expectedErr error
-
+			Context("having the check step erroring", func() {
 				BeforeEach(func() {
-					expectedErr = errors.New("run-check-step-err")
-					fakeClient.RunCheckStepReturns(worker.CheckResult{}, expectedErr)
+					chosenContainer.ProcessDefs[0].Stub.Err = "run-check-step-err"
 				})
 
 				It("errors", func() {
-					Expect(stepErr).To(HaveOccurred())
-					Expect(errors.Is(stepErr, expectedErr)).To(BeTrue())
+					Expect(stepErr).To(MatchError(ContainSubstring("run-check-step-err")))
 				})
 
 				It("points the resource or resource type to the scope", func() {
@@ -745,29 +620,27 @@ var _ = Describe("CheckStep", func() {
 				It("does not emit a Finished event", func() {
 					Expect(fakeDelegate.FinishedCallCount()).To(Equal(0))
 				})
+			})
 
-				Context("with a script failure", func() {
-					BeforeEach(func() {
-						fakeClient.RunCheckStepReturns(worker.CheckResult{}, runtime.ErrResourceScriptFailed{
-							ExitStatus: 42,
-						})
-					})
+			Context("with a script failure", func() {
+				BeforeEach(func() {
+					chosenContainer.ProcessDefs[0].Stub.ExitStatus = 42
+				})
 
-					It("does not error", func() {
-						// don't return an error - the script output has already been
-						// printed, and emitting an errored event would double it up
-						Expect(stepErr).ToNot(HaveOccurred())
-					})
+				It("does not error", func() {
+					// don't return an error - the script output has already been
+					// printed, and emitting an errored event would double it up
+					Expect(stepErr).ToNot(HaveOccurred())
+				})
 
-					It("updates the scope's last check end time", func() {
-						Expect(fakeResourceConfigScope.UpdateLastCheckEndTimeCallCount()).To(Equal(1))
-					})
+				It("updates the scope's last check end time", func() {
+					Expect(fakeResourceConfigScope.UpdateLastCheckEndTimeCallCount()).To(Equal(1))
+				})
 
-					It("emits a failed Finished event", func() {
-						Expect(fakeDelegate.FinishedCallCount()).To(Equal(1))
-						_, succeeded := fakeDelegate.FinishedArgsForCall(0)
-						Expect(succeeded).To(BeFalse())
-					})
+				It("emits a failed Finished event", func() {
+					Expect(fakeDelegate.FinishedCallCount()).To(Equal(1))
+					_, succeeded := fakeDelegate.FinishedArgsForCall(0)
+					Expect(succeeded).To(BeFalse())
 				})
 			})
 
@@ -790,52 +663,12 @@ var _ = Describe("CheckStep", func() {
 
 	Context("having credentials in the config", func() {
 		BeforeEach(func() {
-			checkPlan.Source = atc.Source{"some": "((super-secret-source))"}
+			checkPlan.Source = atc.Source{"some": "((missing-cred))"}
 		})
 
 		Context("having cred evaluation failing", func() {
-			var expectedErr error
-
-			BeforeEach(func() {
-				expectedErr = errors.New("creds-err")
-
-				fakeRunState.GetReturns(nil, false, expectedErr)
-			})
-
 			It("errors", func() {
 				Expect(stepErr).To(HaveOccurred())
-				Expect(errors.Is(stepErr, expectedErr)).To(BeTrue())
-			})
-		})
-	})
-
-	Context("having credentials in a resource type", func() {
-		BeforeEach(func() {
-			resTypes := atc.VersionedResourceTypes{
-				{
-					ResourceType: atc.ResourceType{
-						Source: atc.Source{
-							"some-custom": "((super-secret-source))",
-						},
-					},
-				},
-			}
-
-			checkPlan.VersionedResourceTypes = resTypes
-		})
-
-		Context("having cred evaluation failing", func() {
-			var expectedErr error
-
-			BeforeEach(func() {
-				expectedErr = errors.New("creds-err")
-
-				fakeRunState.GetReturns(nil, false, expectedErr)
-			})
-
-			It("errors", func() {
-				Expect(stepErr).To(HaveOccurred())
-				Expect(errors.Is(stepErr, expectedErr)).To(BeTrue())
 			})
 		})
 	})

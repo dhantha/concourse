@@ -62,12 +62,6 @@ all =
                     >> when iAmLookingAtTheStepBody
                     >> when iAmLookingAtTheMetadataTable
                     >> then_ iSeeABottomMargin
-            , test "has a table that has cells with bottom borders" <|
-                given iVisitABuildWithAGetStep
-                    >> given theGetStepIsExpanded
-                    >> when iAmLookingAtTheStepBody
-                    >> when iAmLookingAtTheMetadataTableCells
-                    >> then_ iSeeLightGrayBottomBorder
             , test "has a table with cells that don't have a shared border" <|
                 given iVisitABuildWithAGetStep
                     >> given theGetStepIsExpanded
@@ -360,7 +354,7 @@ all =
                 given iVisitABuildWithATaskStep
                     >> given (thereIsAnImageCheckStep taskStepId)
                     >> given (thereIsALog imageCheckStepId)
-                    >> given theTaskInitializationIsExpanded
+                    >> given (theStepInitializationIsExpanded taskStepId)
                     >> given theImageCheckStepIsExpanded
                     >> when iAmLookingAtTheStepBody
                     >> then_ iSeeTheLogOutput
@@ -368,7 +362,7 @@ all =
                 given iVisitABuildWithATaskStep
                     >> given (thereIsAnImageGetStep taskStepId)
                     >> given (thereIsALog imageGetStepId)
-                    >> given theTaskInitializationIsExpanded
+                    >> given (theStepInitializationIsExpanded taskStepId)
                     >> given theImageGetStepIsExpanded
                     >> when iAmLookingAtTheStepBody
                     >> then_ iSeeTheLogOutput
@@ -391,6 +385,52 @@ all =
                     >> given theCheckStepIsExpanded
                     >> when iAmLookingAtTheStepBody
                     >> then_ iSeeTheResourceName
+            , test "shows image check sub-step" <|
+                given iVisitABuildWithACheckStep
+                    >> given (theStepInitializationIsExpanded checkStepId)
+                    >> given (thereIsALog imageCheckStepId)
+                    >> given theImageCheckStepIsExpanded
+                    >> when iAmLookingAtTheStepBody
+                    >> then_ iSeeTheLogOutput
+            , test "shows image get sub-step" <|
+                given iVisitABuildWithACheckStep
+                    >> given (theStepInitializationIsExpanded checkStepId)
+                    >> given (thereIsALog imageGetStepId)
+                    >> given theImageGetStepIsExpanded
+                    >> when iAmLookingAtTheStepBody
+                    >> then_ iSeeTheLogOutput
+            ]
+        , describe "get step"
+            [ test "shows image check sub-step" <|
+                given iVisitABuildWithAGetStep
+                    >> given (theStepInitializationIsExpanded getStepId)
+                    >> given (thereIsALog imageCheckStepId)
+                    >> given theImageCheckStepIsExpanded
+                    >> when iAmLookingAtTheStepBody
+                    >> then_ iSeeTheLogOutput
+            , test "shows image get sub-step" <|
+                given iVisitABuildWithAGetStep
+                    >> given (theStepInitializationIsExpanded getStepId)
+                    >> given (thereIsALog imageGetStepId)
+                    >> given theImageGetStepIsExpanded
+                    >> when iAmLookingAtTheStepBody
+                    >> then_ iSeeTheLogOutput
+            ]
+        , describe "put step"
+            [ test "shows image check sub-step" <|
+                given iVisitABuildWithAPutStep
+                    >> given (theStepInitializationIsExpanded putStepId)
+                    >> given (thereIsALog imageCheckStepId)
+                    >> given theImageCheckStepIsExpanded
+                    >> when iAmLookingAtTheStepBody
+                    >> then_ iSeeTheLogOutput
+            , test "shows image get sub-step" <|
+                given iVisitABuildWithAPutStep
+                    >> given (theStepInitializationIsExpanded putStepId)
+                    >> given (thereIsALog imageGetStepId)
+                    >> given theImageGetStepIsExpanded
+                    >> when iAmLookingAtTheStepBody
+                    >> then_ iSeeTheLogOutput
             ]
         , describe "set-pipeline step"
             [ test "should show pipeline name" <|
@@ -571,6 +611,12 @@ iVisitABuildWithAGetStep =
         >> theGetStepReturnsMetadata
 
 
+iVisitABuildWithAPutStep =
+    iOpenTheBuildPage
+        >> myBrowserFetchedTheBuild
+        >> thePlanContainsAPutStep
+
+
 iVisitABuildWithASetPipelineStep =
     iOpenTheBuildPage
         >> myBrowserFetchedTheBuild
@@ -605,9 +651,9 @@ theTaskStepIsExpanded =
         >> Application.update (Update <| Message.Click <| StepHeader taskStepId)
 
 
-theTaskInitializationIsExpanded =
+theStepInitializationIsExpanded stepId =
     Tuple.first
-        >> Application.update (Update <| Message.Click <| StepInitialization taskStepId)
+        >> Application.update (Update <| Message.Click <| StepInitialization stepId)
 
 
 theImageCheckStepIsExpanded =
@@ -929,7 +975,19 @@ thePlanContainsACheckStep =
             (Callback.PlanAndResourcesFetched 1 <|
                 Ok
                     ( { id = checkStepId
-                      , step = Concourse.BuildStepCheck "resource-name"
+                      , step =
+                            Concourse.BuildStepCheck "resource-name"
+                                (Just
+                                    { check =
+                                        { id = imageCheckStepId
+                                        , step = Concourse.BuildStepCheck "some-check" Nothing
+                                        }
+                                    , get =
+                                        { id = imageGetStepId
+                                        , step = Concourse.BuildStepGet "some-get" Nothing Nothing Nothing
+                                        }
+                                    }
+                                )
                       }
                     , { inputs = []
                       , outputs = []
@@ -965,17 +1023,32 @@ acrossStepId =
     "acrossStep"
 
 
+getStepId =
+    "getStepId"
+
+
 thePlanContainsAGetStep =
     Tuple.first
         >> Application.handleCallback
             (Callback.PlanAndResourcesFetched 1 <|
                 Ok
-                    ( { id = "getStepId"
+                    ( { id = getStepId
                       , step =
                             Concourse.BuildStepGet
                                 "the-git-resource"
                                 (Just "the-git-resource")
                                 (Just (Dict.fromList [ ( "ref", "abc123" ) ]))
+                                (Just
+                                    { check =
+                                        { id = imageCheckStepId
+                                        , step = Concourse.BuildStepCheck "some-check" Nothing
+                                        }
+                                    , get =
+                                        { id = imageGetStepId
+                                        , step = Concourse.BuildStepGet "some-get" Nothing Nothing Nothing
+                                        }
+                                    }
+                                )
                       }
                     , { inputs = []
                       , outputs = []
@@ -1005,6 +1078,39 @@ theGetStepReturnsMetadata =
                                     Nothing
                           }
                         ]
+            )
+
+
+putStepId =
+    "putStepId"
+
+
+thePlanContainsAPutStep =
+    Tuple.first
+        >> Application.handleCallback
+            (Callback.PlanAndResourcesFetched 1 <|
+                Ok
+                    ( { id = putStepId
+                      , step =
+                            Concourse.BuildStepPut
+                                "the-git-resource"
+                                (Just "the-git-resource")
+                                (Just
+                                    { check =
+                                        { id = imageCheckStepId
+                                        , step = Concourse.BuildStepCheck "some-check" Nothing
+                                        }
+                                    , get =
+                                        { id = imageGetStepId
+                                        , step = Concourse.BuildStepGet "some-get" Nothing Nothing Nothing
+                                        }
+                                    }
+                                )
+                      }
+                    , { inputs = []
+                      , outputs = []
+                      }
+                    )
             )
 
 
@@ -1076,11 +1182,11 @@ iSeeTheyTopAlignText =
 
 
 iSeeLightGrayCellBackground =
-    Query.has [ style "background-color" "rgb(45,45,45)" ]
+    Query.has [ style "background-color" "#4D4D4D" ]
 
 
 iSeeDarkGrayCellBackground =
-    Query.has [ style "background-color" "rgb(30,30,30)" ]
+    Query.has [ style "background-color" "#262626" ]
 
 
 iSeeATableWithBorderCollapse =
@@ -1092,11 +1198,12 @@ iSeeABottomMargin =
 
 
 iSeeLightGrayBottomBorder =
-    Query.each (Query.has [ style "border-bottom" "5px solid rgb(45,45,45)" ])
+    Query.first
+        >> Query.has [ style "border-bottom" "8px solid #4D4D4D" ]
 
 
 iSeeTheyHavePaddingAllAround =
-    Query.each (Query.has [ style "padding" "5px" ])
+    Query.each (Query.has [ style "padding" "8px" ])
 
 
 iAmLookingAtTheTabList =
@@ -1167,7 +1274,7 @@ iSeeASpinner =
 iSeeStatusIcon asset =
     Query.has
         (iconSelector
-            { size = "28px"
+            { size = "14px"
             , image = asset
             }
         )
@@ -1432,7 +1539,7 @@ thereIsAnImageCheckStep stepId =
                                 { source = ""
                                 , id = stepId
                                 }
-                                (Concourse.BuildPlan imageCheckStepId (Concourse.BuildStepCheck "image"))
+                                (Concourse.BuildPlan imageCheckStepId (Concourse.BuildStepCheck "image" Nothing))
                       , url = "http://localhost:8080/api/v1/builds/1/events"
                       }
                     ]
@@ -1449,7 +1556,7 @@ thereIsAnImageGetStep stepId =
                                 { source = ""
                                 , id = stepId
                                 }
-                                (Concourse.BuildPlan imageGetStepId (Concourse.BuildStepGet "image" Nothing Nothing))
+                                (Concourse.BuildPlan imageGetStepId (Concourse.BuildStepGet "image" Nothing Nothing Nothing))
                       , url = "http://localhost:8080/api/v1/builds/1/events"
                       }
                     ]

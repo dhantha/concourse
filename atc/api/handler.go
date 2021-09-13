@@ -29,10 +29,16 @@ import (
 	"github.com/concourse/concourse/atc/db"
 	"github.com/concourse/concourse/atc/gc"
 	"github.com/concourse/concourse/atc/mainredirect"
-	"github.com/concourse/concourse/atc/worker"
 	"github.com/concourse/concourse/atc/wrappa"
 	"github.com/tedsuo/rata"
 )
+
+//go:generate counterfeiter . Pool
+
+type Pool interface {
+	artifactserver.Pool
+	containerserver.Pool
+}
 
 func NewHandler(
 	logger lager.Logger,
@@ -58,7 +64,7 @@ func NewHandler(
 
 	eventHandlerFactory buildserver.EventHandlerFactory,
 
-	workerPool worker.Pool,
+	workerPool Pool,
 
 	sink *lager.ReconfigurableSink,
 
@@ -96,7 +102,7 @@ func NewHandler(
 	workerServer := workerserver.NewServer(logger, workerTeamFactory, dbWorkerFactory)
 	logLevelServer := loglevelserver.NewServer(logger, sink)
 	cliServer := cliserver.NewServer(logger, absCLIDownloadsDir)
-	containerServer := containerserver.NewServer(logger, workerPool, secretManager, varSourcePool, interceptTimeoutFactory, interceptUpdateInterval, containerRepository, destroyer, clock)
+	containerServer := containerserver.NewServer(logger, workerPool, interceptTimeoutFactory, interceptUpdateInterval, containerRepository, destroyer, clock)
 	volumesServer := volumeserver.NewServer(logger, volumeRepository, destroyer)
 	teamServer := teamserver.NewServer(logger, dbTeamFactory, externalURL)
 	infoServer := infoserver.NewServer(logger, version, workerVersion, externalURL, clusterName, credsManagers)
@@ -159,7 +165,7 @@ func NewHandler(
 
 		atc.ListAllResources:        http.HandlerFunc(resourceServer.ListAllResources),
 		atc.ListResources:           pipelineHandlerFactory.HandlerFor(resourceServer.ListResources),
-		atc.ListResourceTypes:       pipelineHandlerFactory.HandlerFor(resourceServer.ListVersionedResourceTypes),
+		atc.ListResourceTypes:       pipelineHandlerFactory.HandlerFor(resourceServer.ListResourceTypes),
 		atc.GetResource:             pipelineHandlerFactory.HandlerFor(resourceServer.GetResource),
 		atc.UnpinResource:           pipelineHandlerFactory.HandlerFor(resourceServer.UnpinResource),
 		atc.SetPinCommentOnResource: pipelineHandlerFactory.HandlerFor(resourceServer.SetPinCommentOnResource),

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
@@ -10,13 +11,14 @@ import (
 	"code.cloudfoundry.org/clock/fakeclock"
 	"code.cloudfoundry.org/lager/lagertest"
 	"github.com/concourse/concourse/atc"
-	"github.com/concourse/concourse/atc/db"
 	"github.com/concourse/concourse/atc/db/dbfakes"
 	"github.com/concourse/concourse/atc/db/lock/lockfakes"
+	"github.com/concourse/concourse/atc/event"
 	"github.com/concourse/concourse/atc/exec"
+	"github.com/concourse/concourse/atc/exec/execfakes"
 	"github.com/concourse/concourse/atc/policy/policyfakes"
-	"github.com/concourse/concourse/atc/worker"
-	"github.com/concourse/concourse/atc/worker/workerfakes"
+	"github.com/concourse/concourse/atc/runtime"
+	"github.com/concourse/concourse/atc/runtime/runtimetest"
 	"github.com/concourse/concourse/vars"
 )
 
@@ -27,19 +29,19 @@ var noopStepper exec.Stepper = func(atc.Plan) exec.Step {
 
 var _ = Describe("TaskDelegate", func() {
 	var (
-		logger              *lagertest.TestLogger
-		fakeBuild           *dbfakes.FakeBuild
-		fakeClock           *fakeclock.FakeClock
-		fakePolicyChecker   *policyfakes.FakeChecker
-		fakeArtifactSourcer *workerfakes.FakeArtifactSourcer
-		fakeWorkerFactory   *dbfakes.FakeWorkerFactory
-		fakeLockFactory     *lockfakes.FakeLockFactory
+		logger            *lagertest.TestLogger
+		fakeBuild         *dbfakes.FakeBuild
+		fakeClock         *fakeclock.FakeClock
+		fakePolicyChecker *policyfakes.FakeChecker
+		fakeWorkerFactory *dbfakes.FakeWorkerFactory
+		fakeLockFactory   *lockfakes.FakeLockFactory
 
 		state exec.RunState
 
 		now = time.Date(1991, 6, 3, 5, 30, 0, 0, time.UTC)
 
 		delegate *taskDelegate
+		planID   = atc.PlanID("some-plan-id")
 
 		exitStatus exec.ExitStatus
 	)
@@ -56,11 +58,10 @@ var _ = Describe("TaskDelegate", func() {
 		state = exec.NewRunState(noopStepper, credVars, true)
 
 		fakePolicyChecker = new(policyfakes.FakeChecker)
-		fakeArtifactSourcer = new(workerfakes.FakeArtifactSourcer)
 		fakeWorkerFactory = new(dbfakes.FakeWorkerFactory)
 		fakeLockFactory = new(lockfakes.FakeLockFactory)
 
-		delegate = NewTaskDelegate(fakeBuild, "some-plan-id", state, fakeClock, fakePolicyChecker, fakeArtifactSourcer, fakeWorkerFactory, fakeLockFactory).(*taskDelegate)
+		delegate = NewTaskDelegate(fakeBuild, planID, state, fakeClock, fakePolicyChecker, fakeWorkerFactory, fakeLockFactory).(*taskDelegate)
 
 		delegate.SetTaskConfig(atc.TaskConfig{
 			Platform: "some-platform",
@@ -134,16 +135,8 @@ var _ = Describe("TaskDelegate", func() {
 	})
 
 	Describe("Finished", func() {
-		var fakeClient *workerfakes.FakeClient
-		var fakeStrategy *workerfakes.FakeContainerPlacementStrategy
-
-		BeforeEach(func() {
-			fakeClient = new(workerfakes.FakeClient)
-			fakeStrategy = new(workerfakes.FakeContainerPlacementStrategy)
-		})
-
 		JustBeforeEach(func() {
-			delegate.Finished(logger, exitStatus, fakeStrategy, fakeClient)
+			delegate.Finished(logger, exitStatus)
 		})
 
 		It("saves an event", func() {
@@ -152,60 +145,170 @@ var _ = Describe("TaskDelegate", func() {
 			Expect(event.EventType()).To(Equal(atc.EventType("finish-task")))
 		})
 	})
+
+	Describe("FetchImage", func() {
+		var delegate exec.TaskDelegate
+
+		var expectedCheckPlan, expectedGetPlan atc.Plan
+		var types atc.ResourceTypes
+		var imageResource atc.ImageResource
+
+		var volume *runtimetest.Volume
+		var fakeResourceCache *dbfakes.FakeResourceCache
+
+		var runPlans []atc.Plan
+		var stepper exec.Stepper
+
+		var tags []string
+		var privileged bool
+
+		var imageSpec runtime.ImageSpec
+		var fetchErr error
+
+		BeforeEach(func() {
+			atc.DefaultCheckInterval = 1 * time.Minute
+			volume = runtimetest.NewVolume("some-volume")
+
+			runPlans = nil
+			stepper = func(p atc.Plan) exec.Step {
+				runPlans = append(runPlans, p)
+
+				step := new(execfakes.FakeStep)
+				fakeResourceCache = new(dbfakes.FakeResourceCache)
+				step.RunStub = func(_ context.Context, state exec.RunState) (bool, error) {
+					if p.Get != nil {
+						state.ArtifactRepository().RegisterArtifact("image", volume)
+						state.StoreResult(expectedGetPlan.ID, exec.GetResult{
+							Name:          "image",
+							ResourceCache: fakeResourceCache,
+						})
+					}
+					return true, nil
+				}
+				return step
+			}
+
+			runState := exec.NewRunState(stepper, nil, false)
+			delegate = NewTaskDelegate(fakeBuild, planID, runState, fakeClock, fakePolicyChecker, fakeWorkerFactory, fakeLockFactory)
+
+			imageResource = atc.ImageResource{
+				Type:   "docker",
+				Source: atc.Source{"some": "((source-var))"},
+				Params: atc.Params{"some": "((params-var))"},
+				Tags:   atc.Tags{"some", "tags"},
+			}
+
+			types = atc.ResourceTypes{
+				{
+					Name:   "some-custom-type",
+					Type:   "another-custom-type",
+					Source: atc.Source{"some-custom": "((source-var))"},
+					Params: atc.Params{"some-custom": "((params-var))"},
+				},
+				{
+					Name:       "another-custom-type",
+					Type:       "registry-image",
+					Source:     atc.Source{"another-custom": "((source-var))"},
+					Privileged: true,
+				},
+			}
+
+			expectedCheckPlan = atc.Plan{
+				ID: planID + "/image-check",
+				Check: &atc.CheckPlan{
+					Name:   "image",
+					Type:   "docker",
+					Source: atc.Source{"some": "((source-var))"},
+					TypeImage: atc.TypeImage{
+						BaseType: "docker",
+					},
+					Tags: atc.Tags{"some", "tags"},
+					Interval: atc.CheckEvery{
+						Interval: 1 * time.Minute,
+					},
+				},
+			}
+
+			expectedGetPlan = atc.Plan{
+				ID: planID + "/image-get",
+				Get: &atc.GetPlan{
+					Name:   "image",
+					Type:   "docker",
+					Source: atc.Source{"some": "((source-var))"},
+					TypeImage: atc.TypeImage{
+						BaseType: "docker",
+					},
+					VersionFrom: &expectedCheckPlan.ID,
+					Params:      atc.Params{"some": "((params-var))"},
+					Tags:        atc.Tags{"some", "tags"},
+				},
+			}
+		})
+
+		AfterEach(func() {
+			atc.DefaultCheckInterval = 0
+		})
+
+		JustBeforeEach(func() {
+			imageSpec, fetchErr = delegate.FetchImage(context.TODO(), imageResource, types, privileged, tags)
+		})
+
+		It("succeeds", func() {
+			Expect(fetchErr).ToNot(HaveOccurred())
+		})
+
+		It("returns an image spec containing the artifact", func() {
+			Expect(imageSpec).To(Equal(runtime.ImageSpec{
+				ImageArtifact: volume,
+				Privileged:    false,
+			}))
+		})
+
+		It("generates and runs a check and get plan", func() {
+			Expect(runPlans).To(Equal([]atc.Plan{
+				expectedCheckPlan,
+				expectedGetPlan,
+			}))
+		})
+
+		It("sends events for image check and get", func() {
+			Expect(fakeBuild.SaveEventCallCount()).To(Equal(2))
+			e := fakeBuild.SaveEventArgsForCall(0)
+			Expect(e).To(Equal(event.ImageCheck{
+				Time: 675927000,
+				Origin: event.Origin{
+					ID: event.OriginID(planID),
+				},
+				PublicPlan: expectedCheckPlan.Public(),
+			}))
+
+			e = fakeBuild.SaveEventArgsForCall(1)
+			Expect(e).To(Equal(event.ImageGet{
+				Time: 675927000,
+				Origin: event.Origin{
+					ID: event.OriginID(planID),
+				},
+				PublicPlan: expectedGetPlan.Public(),
+			}))
+		})
+
+		Context("when the check plan is nil", func() {
+			BeforeEach(func() {
+				imageResource.Version = atc.Version{"some": "version"}
+				expectedGetPlan.Get.Version = &atc.Version{"some": "version"}
+			})
+
+			It("only saves an ImageGet event", func() {
+				Expect(fakeBuild.SaveEventCallCount()).To(Equal(1))
+				e := fakeBuild.SaveEventArgsForCall(0)
+				Expect(e).To(Equal(event.ImageGet{
+					Time: 675927000,
+					Origin: event.Origin{
+						ID: event.OriginID(planID),
+					},
+					PublicPlan: expectedGetPlan.Public(),
+				}))
+			})
+		})
+	})
 })
-
-func containerSpecDummy() worker.ContainerSpec {
-	cpu := uint64(1024)
-	memory := uint64(1024)
-
-	return worker.ContainerSpec{
-		TeamID: 123,
-		ImageSpec: worker.ImageSpec{
-			ImageArtifactSource: new(workerfakes.FakeStreamableArtifactSource),
-			Privileged:          false,
-		},
-		Limits: worker.ContainerLimits{
-			CPU:    &cpu,
-			Memory: &memory,
-		},
-		Dir:     "some-artifact-root",
-		Env:     []string{"SECURE=secret-task-param"},
-		Inputs:  []worker.InputSource{},
-		Outputs: worker.OutputPaths{},
-	}
-}
-
-func workerSpecDummy() worker.WorkerSpec {
-	return worker.WorkerSpec{
-		TeamID:   123,
-		Platform: "some-platform",
-		Tags:     []string{"step", "tags"},
-	}
-}
-
-func containerOwnerDummy() db.ContainerOwner {
-	return db.NewBuildStepContainerOwner(
-		1234,
-		atc.PlanID("42"),
-		123,
-	)
-}
-
-func workerStub() *dbfakes.FakeWorker {
-	fakeWorker := new(dbfakes.FakeWorker)
-	fakeWorker.NameReturns("some-worker")
-
-	activeTasks := 0
-	fakeWorker.IncreaseActiveTasksStub = func() (int, error) {
-		activeTasks++
-		return activeTasks, nil
-	}
-	fakeWorker.DecreaseActiveTasksStub = func() (int, error) {
-		activeTasks--
-		return activeTasks, nil
-	}
-	fakeWorker.ActiveTasksStub = func() (int, error) {
-		return activeTasks, nil
-	}
-	return fakeWorker
-}

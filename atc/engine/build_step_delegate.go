@@ -10,14 +10,13 @@ import (
 
 	"code.cloudfoundry.org/clock"
 	"code.cloudfoundry.org/lager"
-	"code.cloudfoundry.org/lager/lagerctx"
 	"github.com/concourse/concourse/atc"
 	"github.com/concourse/concourse/atc/db"
 	"github.com/concourse/concourse/atc/event"
 	"github.com/concourse/concourse/atc/exec"
 	"github.com/concourse/concourse/atc/exec/build"
 	"github.com/concourse/concourse/atc/policy"
-	"github.com/concourse/concourse/atc/worker"
+	"github.com/concourse/concourse/atc/runtime"
 	"github.com/concourse/concourse/tracing"
 	"github.com/concourse/concourse/vars"
 	"go.opentelemetry.io/otel/trace"
@@ -25,14 +24,13 @@ import (
 )
 
 type buildStepDelegate struct {
-	build           db.Build
-	planID          atc.PlanID
-	clock           clock.Clock
-	state           exec.RunState
-	stderr          io.Writer
-	stdout          io.Writer
-	policyChecker   policy.Checker
-	artifactSourcer worker.ArtifactSourcer
+	build         db.Build
+	planID        atc.PlanID
+	clock         clock.Clock
+	state         exec.RunState
+	stderr        io.Writer
+	stdout        io.Writer
+	policyChecker policy.Checker
 }
 
 func NewBuildStepDelegate(
@@ -41,17 +39,15 @@ func NewBuildStepDelegate(
 	state exec.RunState,
 	clock clock.Clock,
 	policyChecker policy.Checker,
-	artifactSourcer worker.ArtifactSourcer,
 ) *buildStepDelegate {
 	return &buildStepDelegate{
-		build:           build,
-		planID:          planID,
-		clock:           clock,
-		state:           state,
-		stdout:          nil,
-		stderr:          nil,
-		policyChecker:   policyChecker,
-		artifactSourcer: artifactSourcer,
+		build:         build,
+		planID:        planID,
+		clock:         clock,
+		state:         state,
+		stdout:        nil,
+		stderr:        nil,
+		policyChecker: policyChecker,
 	}
 }
 
@@ -66,20 +62,6 @@ func (delegate *buildStepDelegate) StartSpan(
 	}
 
 	return tracing.StartSpan(ctx, component, attrs)
-}
-
-type credVarsIterator struct {
-	line string
-}
-
-func (it *credVarsIterator) YieldCred(name, value string) {
-	for _, lineValue := range strings.Split(value, "\n") {
-		lineValue = strings.TrimSpace(lineValue)
-		// Don't consider a single char as a secret.
-		if len(lineValue) > 1 {
-			it.line = strings.Replace(it.line, lineValue, "((redacted))", -1)
-		}
-	}
 }
 
 func (delegate *buildStepDelegate) Stdout() io.Writer {
@@ -227,131 +209,58 @@ func (delegate *buildStepDelegate) Errored(logger lager.Logger, message string) 
 	}
 }
 
-// Name of the artifact fetched when using image_resource. Note that this only
-// exists within a local scope, so it doesn't pollute the build state.
-const defaultImageName = "image"
-
 func (delegate *buildStepDelegate) FetchImage(
 	ctx context.Context,
-	image atc.ImageResource,
-	types atc.VersionedResourceTypes,
+	getPlan atc.Plan,
+	checkPlan *atc.Plan,
 	privileged bool,
-) (worker.ImageSpec, error) {
-	err := delegate.checkImagePolicy(image, privileged)
+) (runtime.ImageSpec, db.ResourceCache, error) {
+	err := delegate.checkImagePolicy(getPlan.Get.Source, getPlan.Get.Type, privileged)
 	if err != nil {
-		return worker.ImageSpec{}, err
+		return runtime.ImageSpec{}, nil, err
 	}
 
 	fetchState := delegate.state.NewLocalScope()
 
-	imageName := defaultImageName
-	if image.Name != "" {
-		imageName = image.Name
-	}
-
-	version := image.Version
-	if version == nil {
-		checkID := delegate.planID + "/image-check"
-
-		checkPlan := atc.Plan{
-			ID: checkID,
-			Check: &atc.CheckPlan{
-				Name:   imageName,
-				Type:   image.Type,
-				Source: image.Source,
-
-				VersionedResourceTypes: types,
-
-				Tags: image.Tags,
-			},
-		}
-
-		err := delegate.build.SaveEvent(event.ImageCheck{
-			Time: delegate.clock.Now().Unix(),
-			Origin: event.Origin{
-				ID: event.OriginID(delegate.planID),
-			},
-			PublicPlan: checkPlan.Public(),
-		})
+	if checkPlan != nil {
+		ok, err := fetchState.Run(ctx, *checkPlan)
 		if err != nil {
-			return worker.ImageSpec{}, fmt.Errorf("save image check event: %w", err)
-		}
-
-		ok, err := fetchState.Run(ctx, checkPlan)
-		if err != nil {
-			return worker.ImageSpec{}, err
+			return runtime.ImageSpec{}, nil, err
 		}
 
 		if !ok {
-			return worker.ImageSpec{}, fmt.Errorf("image check failed")
+			return runtime.ImageSpec{}, nil, fmt.Errorf("image check failed")
 		}
-
-		if !fetchState.Result(checkID, &version) {
-			return worker.ImageSpec{}, fmt.Errorf("check did not return a version")
-		}
-	}
-
-	getID := delegate.planID + "/image-get"
-
-	getPlan := atc.Plan{
-		ID: getID,
-		Get: &atc.GetPlan{
-			Name:    imageName,
-			Type:    image.Type,
-			Source:  image.Source,
-			Version: &version,
-			Params:  image.Params,
-
-			VersionedResourceTypes: types,
-
-			Tags: image.Tags,
-		},
-	}
-
-	err = delegate.build.SaveEvent(event.ImageGet{
-		Time: delegate.clock.Now().Unix(),
-		Origin: event.Origin{
-			ID: event.OriginID(delegate.planID),
-		},
-		PublicPlan: getPlan.Public(),
-	})
-	if err != nil {
-		return worker.ImageSpec{}, fmt.Errorf("save image get event: %w", err)
 	}
 
 	ok, err := fetchState.Run(ctx, getPlan)
 	if err != nil {
-		return worker.ImageSpec{}, err
+		return runtime.ImageSpec{}, nil, err
 	}
 
 	if !ok {
-		return worker.ImageSpec{}, fmt.Errorf("image fetching failed")
+		return runtime.ImageSpec{}, nil, fmt.Errorf("image fetching failed")
 	}
 
-	var cache db.UsedResourceCache
-	if !fetchState.Result(getID, &cache) {
-		return worker.ImageSpec{}, fmt.Errorf("get did not return a cache")
+	var result exec.GetResult
+	if !fetchState.Result(getPlan.ID, &result) {
+		return runtime.ImageSpec{}, nil, fmt.Errorf("get did not return a result")
 	}
 
-	err = delegate.build.SaveImageResourceVersion(cache)
+	err = delegate.build.SaveImageResourceVersion(result.ResourceCache)
 	if err != nil {
-		return worker.ImageSpec{}, fmt.Errorf("save image version: %w", err)
+		return runtime.ImageSpec{}, nil, fmt.Errorf("save image version: %w", err)
 	}
 
-	art, found := fetchState.ArtifactRepository().ArtifactFor(build.ArtifactName(imageName))
+	artifact, found := fetchState.ArtifactRepository().ArtifactFor(build.ArtifactName(result.Name))
 	if !found {
-		return worker.ImageSpec{}, fmt.Errorf("fetched artifact not found")
+		return runtime.ImageSpec{}, nil, fmt.Errorf("fetched artifact not found")
 	}
 
-	source, err := delegate.artifactSourcer.SourceImage(lagerctx.FromContext(ctx), art)
-	if err != nil {
-		return worker.ImageSpec{}, fmt.Errorf("wire image: %w", err)
-	}
-
-	return worker.ImageSpec{
-		ImageArtifactSource: source,
-		Privileged:          privileged,
-	}, nil
+	return runtime.ImageSpec{
+		ImageArtifact: artifact,
+		Privileged:    privileged,
+	}, result.ResourceCache, nil
 }
 
 func (delegate *buildStepDelegate) ConstructAcrossSubsteps(templateBytes []byte, acrossVars []atc.AcrossVar, valueCombinations [][]interface{}) ([]atc.VarScopedPlan, error) {
@@ -417,12 +326,12 @@ func (delegate *buildStepDelegate) ConstructAcrossSubsteps(templateBytes []byte,
 	return substeps, nil
 }
 
-func (delegate *buildStepDelegate) checkImagePolicy(image atc.ImageResource, privileged bool) error {
+func (delegate *buildStepDelegate) checkImagePolicy(imageSource atc.Source, imageType string, privileged bool) error {
 	if !delegate.policyChecker.ShouldCheckAction(policy.ActionUseImage) {
 		return nil
 	}
 
-	redactedSource, err := delegate.redactImageSource(image.Source)
+	redactedSource, err := delegate.redactImageSource(imageSource)
 	if err != nil {
 		return fmt.Errorf("redact source: %w", err)
 	}
@@ -432,7 +341,7 @@ func (delegate *buildStepDelegate) checkImagePolicy(image atc.ImageResource, pri
 		Team:     delegate.build.TeamName(),
 		Pipeline: delegate.build.PipelineName(),
 		Data: map[string]interface{}{
-			"image_type":   image.Type,
+			"image_type":   imageType,
 			"image_source": redactedSource,
 			"privileged":   privileged,
 		},
@@ -478,4 +387,18 @@ func (delegate *buildStepDelegate) redactImageSource(source atc.Source) (atc.Sou
 		return source, err
 	}
 	return newSource, nil
+}
+
+type credVarsIterator struct {
+	line string
+}
+
+func (it *credVarsIterator) YieldCred(name, value string) {
+	for _, lineValue := range strings.Split(value, "\n") {
+		lineValue = strings.TrimSpace(lineValue)
+		// Don't consider a single char as a secret.
+		if len(lineValue) > 1 {
+			it.line = strings.Replace(it.line, lineValue, "((redacted))", -1)
+		}
+	}
 }

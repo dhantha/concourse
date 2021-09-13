@@ -18,72 +18,6 @@ type ContainerOwner interface {
 	Create(tx Tx, workerName string) (map[string]interface{}, error)
 }
 
-// NewImageCheckContainerOwner references a container whose image resource this
-// container is checking. When the referenced container transitions to another
-// state, or disappears, the container can be removed.
-func NewImageCheckContainerOwner(
-	container CreatingContainer,
-	teamID int,
-) ContainerOwner {
-	return imageCheckContainerOwner{
-		Container: container,
-		TeamID:    teamID,
-	}
-}
-
-type imageCheckContainerOwner struct {
-	Container CreatingContainer
-	TeamID    int
-}
-
-func (c imageCheckContainerOwner) Find(Conn) (sq.Eq, bool, error) {
-	return sq.Eq(c.sqlMap()), true, nil
-}
-
-func (c imageCheckContainerOwner) Create(Tx, string) (map[string]interface{}, error) {
-	return c.sqlMap(), nil
-}
-
-func (c imageCheckContainerOwner) sqlMap() map[string]interface{} {
-	return map[string]interface{}{
-		"image_check_container_id": c.Container.ID(),
-		"team_id":                  c.TeamID,
-	}
-}
-
-// NewImageGetContainerOwner references a container whose image resource this
-// container is fetching. When the referenced container transitions to another
-// state, or disappears, the container can be removed.
-func NewImageGetContainerOwner(
-	container CreatingContainer,
-	teamID int,
-) ContainerOwner {
-	return imageGetContainerOwner{
-		Container: container,
-		TeamID:    teamID,
-	}
-}
-
-type imageGetContainerOwner struct {
-	Container CreatingContainer
-	TeamID    int
-}
-
-func (c imageGetContainerOwner) Find(Conn) (sq.Eq, bool, error) {
-	return sq.Eq(c.sqlMap()), true, nil
-}
-
-func (c imageGetContainerOwner) Create(Tx, string) (map[string]interface{}, error) {
-	return c.sqlMap(), nil
-}
-
-func (c imageGetContainerOwner) sqlMap() map[string]interface{} {
-	return map[string]interface{}{
-		"image_get_container_id": c.Container.ID(),
-		"team_id":                c.TeamID,
-	}
-}
-
 // NewBuildStepContainerOwner references a step within a build. When the build
 // becomes non-interceptible or disappears, the container can be removed.
 func NewBuildStepContainerOwner(
@@ -225,4 +159,32 @@ func (c resourceConfigCheckSessionContainerOwner) Create(tx Tx, workerName strin
 	return map[string]interface{}{
 		"resource_config_check_session_id": rccsID,
 	}, nil
+
+}
+
+// NewFixedHandleContainerOwner is used in testing to represent a container
+// with a fixed handle, rather than using the randomly generated UUID as a
+// handle.
+func NewFixedHandleContainerOwner(handle string) ContainerOwner {
+	return fixedHandleContainerOwner{
+		Handle: handle,
+	}
+}
+
+type fixedHandleContainerOwner struct {
+	Handle string
+}
+
+func (c fixedHandleContainerOwner) Find(Conn) (sq.Eq, bool, error) {
+	return sq.Eq(c.sqlMap()), true, nil
+}
+
+func (c fixedHandleContainerOwner) Create(Tx, string) (map[string]interface{}, error) {
+	return c.sqlMap(), nil
+}
+
+func (c fixedHandleContainerOwner) sqlMap() map[string]interface{} {
+	return map[string]interface{}{
+		"handle": c.Handle,
+	}
 }

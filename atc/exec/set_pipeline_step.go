@@ -12,28 +12,26 @@ import (
 	"code.cloudfoundry.org/lager/lagerctx"
 	"sigs.k8s.io/yaml"
 
-	"github.com/concourse/baggageclaim"
 	"github.com/concourse/concourse/atc"
 	"github.com/concourse/concourse/atc/configvalidate"
 	"github.com/concourse/concourse/atc/creds"
 	"github.com/concourse/concourse/atc/db"
-	"github.com/concourse/concourse/atc/exec/artifact"
 	"github.com/concourse/concourse/atc/exec/build"
-	"github.com/concourse/concourse/atc/worker"
 	"github.com/concourse/concourse/tracing"
 	"github.com/concourse/concourse/vars"
+	"github.com/concourse/concourse/worker/baggageclaim"
 )
 
 // SetPipelineStep sets a pipeline to current team. This step takes pipeline
 // configure file and var files from some resource in the pipeline, like git.
 type SetPipelineStep struct {
-	planID           atc.PlanID
-	plan             atc.SetPipelinePlan
-	metadata         StepMetadata
-	delegateFactory  SetPipelineStepDelegateFactory
-	teamFactory      db.TeamFactory
-	buildFactory     db.BuildFactory
-	artifactStreamer worker.ArtifactStreamer
+	planID          atc.PlanID
+	plan            atc.SetPipelinePlan
+	metadata        StepMetadata
+	delegateFactory SetPipelineStepDelegateFactory
+	teamFactory     db.TeamFactory
+	buildFactory    db.BuildFactory
+	streamer        Streamer
 }
 
 func NewSetPipelineStep(
@@ -43,16 +41,16 @@ func NewSetPipelineStep(
 	delegateFactory SetPipelineStepDelegateFactory,
 	teamFactory db.TeamFactory,
 	buildFactory db.BuildFactory,
-	artifactStreamer worker.ArtifactStreamer,
+	streamer Streamer,
 ) Step {
 	return &SetPipelineStep{
-		planID:           planID,
-		plan:             plan,
-		metadata:         metadata,
-		delegateFactory:  delegateFactory,
-		teamFactory:      teamFactory,
-		buildFactory:     buildFactory,
-		artifactStreamer: artifactStreamer,
+		planID:          planID,
+		plan:            plan,
+		metadata:        metadata,
+		delegateFactory: delegateFactory,
+		teamFactory:     teamFactory,
+		buildFactory:    buildFactory,
+		streamer:        streamer,
 	}
 }
 
@@ -86,11 +84,6 @@ func (step *SetPipelineStep) run(ctx context.Context, state RunState, delegate S
 	stdout := delegate.Stdout()
 	stderr := delegate.Stderr()
 
-	fmt.Fprintln(stderr, "\x1b[1;33mWARNING: the set_pipeline step is experimental and subject to change!\x1b[0m")
-	fmt.Fprintln(stderr, "")
-	fmt.Fprintln(stderr, "\x1b[33mfollow RFC #31 for updates: https://github.com/concourse/rfcs/pull/31\x1b[0m")
-	fmt.Fprintln(stderr, "")
-
 	if step.plan.Name == "self" {
 		fmt.Fprintln(stderr, "\x1b[1;33mWARNING: 'set_pipeline: self' is experimental and may be removed in the future!\x1b[0m")
 		fmt.Fprintln(stderr, "")
@@ -104,11 +97,11 @@ func (step *SetPipelineStep) run(ctx context.Context, state RunState, delegate S
 	}
 
 	source := setPipelineSource{
-		ctx:              ctx,
-		logger:           logger,
-		step:             step,
-		repo:             state.ArtifactRepository(),
-		artifactStreamer: step.artifactStreamer,
+		ctx:      ctx,
+		logger:   logger,
+		step:     step,
+		repo:     state.ArtifactRepository(),
+		streamer: step.streamer,
 	}
 
 	err = source.Validate()
@@ -255,11 +248,11 @@ func (step *SetPipelineStep) run(ctx context.Context, state RunState, delegate S
 }
 
 type setPipelineSource struct {
-	ctx              context.Context
-	logger           lager.Logger
-	repo             *build.Repository
-	step             *SetPipelineStep
-	artifactStreamer worker.ArtifactStreamer
+	ctx      context.Context
+	logger   lager.Logger
+	repo     *build.Repository
+	step     *SetPipelineStep
+	streamer Streamer
 }
 
 func (s setPipelineSource) Validate() error {
@@ -354,10 +347,10 @@ func (s setPipelineSource) retrieveFromArtifact(name, file string) (io.ReadClose
 		return nil, UnknownArtifactSourceError{build.ArtifactName(name), file}
 	}
 
-	stream, err := s.artifactStreamer.StreamFileFromArtifact(lagerctx.NewContext(s.ctx, s.logger), art, file)
+	stream, err := s.streamer.StreamFile(lagerctx.NewContext(s.ctx, s.logger), art, file)
 	if err != nil {
 		if err == baggageclaim.ErrFileNotFound {
-			return nil, artifact.FileNotFoundError{
+			return nil, FileNotFoundError{
 				Name:     name,
 				FilePath: file,
 			}
