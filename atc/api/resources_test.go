@@ -1787,8 +1787,8 @@ var _ = Describe("Resources API", func() {
 	Describe("DELETE /api/v1/teams/:team_name/pipelines/:pipeline_name/resources/:resource_name/cache", func() {
 		var (
 			versionDeleteBody atc.VersionDeleteBody
-			response *http.Response
-			fakeResource *dbfakes.FakeResource
+			response          *http.Response
+			fakeResource      *dbfakes.FakeResource
 		)
 
 		executeConnection := func() {
@@ -1837,7 +1837,7 @@ var _ = Describe("Resources API", func() {
 
 					Context("when clear cache succeeds", func() {
 						BeforeEach(func() {
-							fakeResource.ClearResourceCacheReturns(1,nil)
+							fakeResource.ClearResourceCacheReturns(1, nil)
 						})
 
 						Context("when no version is passed", func() {

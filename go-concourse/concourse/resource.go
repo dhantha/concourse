@@ -53,7 +53,6 @@ func (team *team) ListResources(pipelineRef atc.PipelineRef) ([]atc.Resource, er
 	return resources, err
 }
 
-
 func (team *team) ClearResourceCache(pipelineRef atc.PipelineRef, ResourceName string, version atc.Version) (int64, error) {
 	params := rata.Params{
 		"team_name":     team.Name(),

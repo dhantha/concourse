@@ -95,7 +95,7 @@ jobs:
 		fakeDelegate        *execfakes.FakeSetPipelineStepDelegate
 		fakeDelegateFactory *execfakes.FakeSetPipelineStepDelegateFactory
 
-		fakeAgent   *policyfakes.FakeAgent
+		fakeAgent *policyfakes.FakeAgent
 
 		fakeArtifactStreamer *workerfakes.FakeArtifactStreamer
 
@@ -360,8 +360,8 @@ jobs:
 					})
 				})
 
-				Context("when policy check fails", func(){
-					BeforeEach(func(){
+				Context("when policy check fails", func() {
+					BeforeEach(func() {
 						fakeDelegate.CheckRunSetPipelinePolicyReturns(errors.New("policy-check-error"))
 					})
 

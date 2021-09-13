@@ -19,10 +19,10 @@ type WatchCommand struct {
 	Url                      string              `short:"u" long:"url"                                    description:"URL for the build or job to watch"`
 	Timestamp                bool                `short:"t" long:"timestamps"                             description:"Print with local timestamp"`
 	IgnoreEventParsingErrors bool                `long:"ignore-event-parsing-errors"                      description:"Ignore event parsing errors"`
-	Team     string                   `long:"team" description:"Name of the team to which the pipeline belongs, if different from the target default"`
+	Team                     string              `long:"team" description:"Name of the team to which the pipeline belongs, if different from the target default"`
 }
 
-func getBuildIDFromURL(target rc.Target, urlParam string, currTeam concourse.Team) (int, error) {
+func getBuildIDFromURL(target rc.Target, urlParam string, currentTeam concourse.Team) (int, error) {
 	var buildId int
 	client := target.Client()
 
@@ -45,8 +45,11 @@ func getBuildIDFromURL(target rc.Target, urlParam string, currTeam concourse.Tea
 	}
 
 	team := urlMap["teams"]
-	if team != "" && team != currTeam.Name() {
-		err = fmt.Errorf("Team in URL doesn't match the current team of the target (%s, %s)", urlParam, team)
+
+	// if the url team does not match --team, give a warning
+
+	if team != "" && team != currentTeam.Name() {
+		err = fmt.Errorf("Team in URL doesn't match the current team of the target or --team (%s, %s)", urlParam, team)
 		return 0, err
 	}
 
@@ -56,7 +59,7 @@ func getBuildIDFromURL(target rc.Target, urlParam string, currTeam concourse.Tea
 		if err != nil {
 			return 0, err
 		}
-		build, err := GetBuild(client, currTeam, urlMap["jobs"], urlMap["builds"], pipelineRef)
+		build, err := GetBuild(client, currentTeam, urlMap["jobs"], urlMap["builds"], pipelineRef)
 
 		if err != nil {
 			return 0, err
@@ -92,9 +95,12 @@ func (command *WatchCommand) Execute(args []string) error {
 		if err != nil {
 			return err
 		}
-	}else{
+	} else {
 		team = target.Team()
 	}
+
+	// if command.Url != ""
+	// pick the team from the url
 
 	var buildId int
 	client := target.Client()

@@ -851,7 +851,7 @@ var _ = Describe("DBProvider", func() {
 		})
 	})
 
-	Describe("FindWorkersForResourceCache", func(){
+	Describe("FindWorkersForResourceCache", func() {
 		var (
 			foundWorkers []Worker
 			findErr      error
@@ -862,22 +862,22 @@ var _ = Describe("DBProvider", func() {
 		})
 
 		Context("when underlying error occurs", func() {
-			BeforeEach(func(){
+			BeforeEach(func() {
 				fakeDBTeam.FindWorkersForResourceCacheReturns(nil, errors.New("some-error"))
 			})
 
-			It("should forward the error", func(){
+			It("should forward the error", func() {
 				Expect(findErr).To(HaveOccurred())
 				Expect(findErr).To(Equal(errors.New("some-error")))
 			})
 		})
 
 		Context("when there there is no underlying error", func() {
-			BeforeEach(func(){
+			BeforeEach(func() {
 				fakeDBTeam.FindWorkersForResourceCacheReturns([]db.Worker{fakeWorker1, fakeWorker2}, nil)
 			})
 
-			It("should find both workers", func(){
+			It("should find both workers", func() {
 				Expect(findErr).ToNot(HaveOccurred())
 				Expect(foundWorkers).To(HaveLen(2))
 

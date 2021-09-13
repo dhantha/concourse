@@ -148,7 +148,6 @@ func (br *buildLogCollector) reapLogsOfJob(pipeline db.Pipeline,
 		maxBuildsRetained := retainedBuilds >= logRetention.Builds
 		buildHasExpired := !build.EndTime().IsZero() && build.EndTime().AddDate(0, 0, logRetention.Days).Before(time.Now())
 
-
 		if logRetention.Builds != 0 {
 			if logRetention.MinimumSucceededBuilds != 0 {
 				if build.Status() == db.BuildStatusSucceeded && retainedSucceededBuilds < logRetention.MinimumSucceededBuilds {
