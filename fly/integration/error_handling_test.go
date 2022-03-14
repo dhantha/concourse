@@ -135,6 +135,8 @@ var _ = Describe("Fly CLI", func() {
 				exec.Command(flyPath, "-t", targetName, "get-pipeline", "-p", "pipeline", "--team", nonExistentTeam)),
 			Entry("order-pipelines command returns an error",
 				exec.Command(flyPath, "-t", targetName, "order-pipelines", "-p", "pipeline", "--team", nonExistentTeam)),
+			Entry("watch command returns an error",
+				exec.Command(flyPath, "-t", targetName, "watch", "-j", "pipeline/job", "--team", nonExistentTeam)),
 			Entry("abort-build command returns an error",
 				exec.Command(flyPath, "-t", targetName, "abort-build", "-j", "pipeline/job", "-b", "4", "--team", nonExistentTeam)),
 			Entry("archive-pipeline command returns an error",
@@ -189,6 +191,8 @@ var _ = Describe("Fly CLI", func() {
 				exec.Command(flyPath, "-t", targetName, "destroy-pipeline", "-p", "pipeline", "--team", otherTeam)),
 			Entry("get-pipeline command returns an error",
 				exec.Command(flyPath, "-t", targetName, "get-pipeline", "-p", "pipeline", "--team", otherTeam)),
+			Entry("watch command returns an error",
+				exec.Command(flyPath, "-t", targetName, "watch", "-j", "pipeline/job", "--team", otherTeam)),
 			Entry("abort-build command returns an error",
 				exec.Command(flyPath, "-t", targetName, "abort-build", "-j", "pipeline/job", "-b", "4", "--team", otherTeam)),
 			Entry("archive-pipeline command returns an error",
@@ -203,4 +207,3 @@ var _ = Describe("Fly CLI", func() {
 				exec.Command(flyPath, "-t", targetName, "resource-versions", "-r", "pipeline/branch:master/foo", "--team", otherTeam)),
 		)
 	})
-})

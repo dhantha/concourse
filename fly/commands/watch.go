@@ -10,6 +10,7 @@ import (
 	"github.com/concourse/concourse/fly/commands/internal/flaghelpers"
 	"github.com/concourse/concourse/fly/eventstream"
 	"github.com/concourse/concourse/fly/rc"
+	"github.com/concourse/concourse/go-concourse/concourse"
 )
 
 type WatchCommand struct {
@@ -18,9 +19,10 @@ type WatchCommand struct {
 	Url                      string              `short:"u" long:"url"                                    description:"URL for the build or job to watch"`
 	Timestamp                bool                `short:"t" long:"timestamps"                             description:"Print with local timestamp"`
 	IgnoreEventParsingErrors bool                `long:"ignore-event-parsing-errors"                      description:"Ignore event parsing errors"`
+	Team                     string              `long:"team" description:"Name of the team to which the pipeline belongs, if different from the target default"`
 }
 
-func getBuildIDFromURL(target rc.Target, urlParam string) (int, error) {
+func getBuildIDFromURL(target rc.Target, urlParam string, currentTeam concourse.Team) (int, error) {
 	var buildId int
 	client := target.Client()
 
@@ -43,8 +45,11 @@ func getBuildIDFromURL(target rc.Target, urlParam string) (int, error) {
 	}
 
 	team := urlMap["teams"]
-	if team != "" && team != target.Team().Name() {
-		err = fmt.Errorf("Team in URL doesn't match the current team of the target (%s, %s)", urlParam, team)
+
+	// if the url team does not match --team, give a warning
+
+	if team != "" && team != currentTeam.Name() {
+		err = fmt.Errorf("Team in URL doesn't match the current team of the target or --team (%s, %s)", urlParam, team)
 		return 0, err
 	}
 
@@ -54,7 +59,7 @@ func getBuildIDFromURL(target rc.Target, urlParam string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		build, err := GetBuild(client, target.Team(), urlMap["jobs"], urlMap["builds"], pipelineRef)
+		build, err := GetBuild(client, currentTeam, urlMap["jobs"], urlMap["builds"], pipelineRef)
 
 		if err != nil {
 			return 0, err
@@ -83,10 +88,24 @@ func (command *WatchCommand) Execute(args []string) error {
 		return err
 	}
 
+	var team concourse.Team
+
+	if command.Team != "" {
+		team, err = target.FindTeam(command.Team)
+		if err != nil {
+			return err
+		}
+	} else {
+		team = target.Team()
+	}
+
+	// if command.Url != ""
+	// pick the team from the url
+
 	var buildId int
 	client := target.Client()
 	if command.Job.JobName != "" || command.Build == "" && command.Url == "" {
-		build, err := GetBuild(client, target.Team(), command.Job.JobName, command.Build, command.Job.PipelineRef)
+		build, err := GetBuild(client, team, command.Job.JobName, command.Build, command.Job.PipelineRef)
 		if err != nil {
 			return err
 		}
@@ -98,7 +117,7 @@ func (command *WatchCommand) Execute(args []string) error {
 			return err
 		}
 	} else if command.Url != "" {
-		buildId, err = getBuildIDFromURL(target, command.Url)
+		buildId, err = getBuildIDFromURL(target, command.Url, team)
 
 		if err != nil {
 			return err
